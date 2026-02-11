@@ -7,6 +7,13 @@
 
 **[English](README.md) | [中文](README_CN.md)**
 
+> [!IMPORTANT]
+> **v0.2.0 新功能：** 现已支持 **Kimi (Moonshot AI)** 和 **OpenAI 兼容** 的提供商！
+> 通过 CLI 即可切换：`set_provider kimi` 或 `set_provider openai`。
+>
+> **支持 OpenRouter, DeepSeek 等！**
+> 只需将提供商设为 `openai` 并更改 `base_url`。
+
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="480" />
 </p>
@@ -36,7 +43,7 @@ MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插
 - 一块 **ESP32-S3 开发板**，16MB Flash + 8MB PSRAM（如小智 AI 开发板，~¥30）
 - 一根 **USB Type-C 数据线**
 - 一个 **Telegram Bot Token** — 在 Telegram 找 [@BotFather](https://t.me/BotFather) 创建
-- 一个 **Anthropic API Key** — 从 [console.anthropic.com](https://console.anthropic.com) 获取
+- 一个 **Anthropic API Key** (Claude) 或 **Moonshot API Key** (Kimi)
 
 ### 安装
 
@@ -48,6 +55,9 @@ git clone https://github.com/memovai/mimiclaw.git
 cd mimiclaw
 
 idf.py set-target esp32s3
+
+# 针对 4MB Flash / 2MB PSRAM 设备优化
+# (已在 sdkconfig.defaults.esp32s3 和 partitions.csv 中预配置)
 ```
 
 ### 配置
@@ -64,10 +74,15 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 #define MIMI_SECRET_WIFI_SSID       "你的WiFi名"
 #define MIMI_SECRET_WIFI_PASS       "你的WiFi密码"
 #define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+
+/* 选择提供商: MIMI_LLM_PROVIDER_ANTHROPIC 或 MIMI_LLM_PROVIDER_OPENAI */
+#define MIMI_SECRET_PROVIDER        MIMI_LLM_PROVIDER_ANTHROPIC 
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
+#define MIMI_SECRET_BASE_URL        "https://api.anthropic.com/v1/messages" // 或 https://api.moonshot.cn/v1/chat/completions
+
 #define MIMI_SECRET_SEARCH_KEY      ""              // 可选：Brave Search API key
-#define MIMI_SECRET_PROXY_HOST      "10.0.0.1"      // 可选：代理地址
-#define MIMI_SECRET_PROXY_PORT      "7897"           // 可选：代理端口
+#define MIMI_SECRET_PROXY_HOST      ""              // 可选：代理地址
+#define MIMI_SECRET_PROXY_PORT      ""              // 可选：代理端口
 ```
 
 然后编译烧录：
@@ -109,8 +124,13 @@ mimi> clear_proxy                    # 清除代理
 ```
 mimi> wifi_set MySSID MyPassword   # 换 WiFi
 mimi> set_tg_token 123456:ABC...   # 换 Telegram Bot Token
-mimi> set_api_key sk-ant-api03-... # 换 Anthropic API Key
-mimi> set_model claude-sonnet-4-5-20250929  # 换模型
+
+# LLM 配置
+mimi> set_provider kimi            # 切换到 Kimi (Moonshot AI)
+mimi> set_base_url https://api.moonshot.cn/v1/chat/completions
+mimi> set_api_key sk-xxxxxxxx...   # 设置 Kimi API Key
+mimi> set_model moonshot-v1-8k     # 设置 Kimi 模型
+
 mimi> set_proxy 192.168.1.83 7897  # 设置代理
 mimi> clear_proxy                  # 清除代理
 mimi> set_search_key BSA...        # 设置 Brave Search API Key
@@ -160,6 +180,36 @@ MimiClaw 使用 Anthropic 的 tool use 协议 — Claude 在对话中可以调�
 - **双核** — 网络 I/O 和 AI 处理分别跑在不同 CPU 核心
 - **HTTP 代理** — CONNECT 隧道，适配受限网络
 - **工具调用** — ReAct Agent 循环，Anthropic tool use 协议
+
+## 硬件优化
+
+MimiClaw 专为低成本 ESP32-S3 开发板（如 4MB Flash / 2MB PSRAM）进行了优化：
+
+- **分区表** (`partitions.csv`)：定制布局，将 AI Agent 应用适配到 **4MB Flash**。
+- **内存配置** (`sdkconfig.defaults.esp32s3`)：
+    - **Flash 模式**：优化为 **QIO 4MB**。
+    - **PSRAM**：配置为 **Quad SPI**（兼容性优于 Octal），支持 2MB。
+    - **TLS/网络**：调整缓冲区大小，在不牺牲稳定性的前提下最小化 RAM 占用。
+
+## OpenAI 及兼容提供商
+
+MimiClaw 支持任何遵循 OpenAI Chat Completions API 格式的提供商。
+
+**示例：OpenRouter**
+```bash
+mimi> set_provider openai
+mimi> set_base_url https://openrouter.ai/api/v1/chat/completions
+mimi> set_api_key sk-or-v1-...
+mimi> set_model anthropic/claude-3-opus
+```
+
+**示例：DeepSeek (V2)**
+```bash
+mimi> set_provider openai
+mimi> set_base_url https://api.deepseek.com/chat/completions
+mimi> set_api_key sk-ds-...
+mimi> set_model deepseek-chat
+```
 
 ## 开发者
 
