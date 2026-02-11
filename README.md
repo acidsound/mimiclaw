@@ -7,6 +7,13 @@
 
 **[English](README.md) | [中文](README_CN.md)**
 
+> [!IMPORTANT]
+> **New in v0.2.0:** Now supports **Kimi (Moonshot AI)** and **OpenAI-compatible** providers!
+> Switch instantly via CLI: `set_provider kimi` or `set_provider openai`.
+>
+> **Works with OpenRouter, DeepSeek, and more!**
+> Just set the provider to `openai` and change the `base_url`.
+
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="480" />
 </p>
@@ -36,7 +43,7 @@ You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it int
 - An **ESP32-S3 dev board** with 16 MB flash and 8 MB PSRAM (e.g. Xiaozhi AI board, ~$10)
 - A **USB Type-C cable**
 - A **Telegram bot token** — talk to [@BotFather](https://t.me/BotFather) on Telegram to create one
-- An **Anthropic API key** — from [console.anthropic.com](https://console.anthropic.com)
+- An **Anthropic API key** (Claude) OR **Moonshot API key** (Kimi)
 
 ### Install
 
@@ -47,6 +54,8 @@ You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it int
 git clone https://github.com/memovai/mimiclaw.git
 cd mimiclaw
 
+# Optimized for 4MB Flash / 2MB PSRAM devices
+# (Pre-configured in sdkconfig.defaults.esp32s3 and partitions.csv)
 idf.py set-target esp32s3
 ```
 
@@ -64,7 +73,12 @@ Edit `main/mimi_secrets.h`:
 #define MIMI_SECRET_WIFI_SSID       "YourWiFiName"
 #define MIMI_SECRET_WIFI_PASS       "YourWiFiPassword"
 #define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+
+/* Choose Provider: MIMI_LLM_PROVIDER_ANTHROPIC or MIMI_LLM_PROVIDER_OPENAI */
+#define MIMI_SECRET_PROVIDER        MIMI_LLM_PROVIDER_ANTHROPIC 
 #define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
+#define MIMI_SECRET_BASE_URL        "https://api.anthropic.com/v1/messages" // or https://api.moonshot.cn/v1/chat/completions
+
 #define MIMI_SECRET_SEARCH_KEY      ""              // optional: Brave Search API key
 #define MIMI_SECRET_PROXY_HOST      ""              // optional: e.g. "10.0.0.1"
 #define MIMI_SECRET_PROXY_PORT      ""              // optional: e.g. "7897"
@@ -94,9 +108,14 @@ Connect via serial to configure or debug. **Config commands** let you change set
 ```
 mimi> wifi_set MySSID MyPassword   # change WiFi network
 mimi> set_tg_token 123456:ABC...   # change Telegram bot token
-mimi> set_api_key sk-ant-api03-... # change Anthropic API key
-mimi> set_model claude-sonnet-4-5  # change LLM model
-mimi> set_proxy 127.0.0.1 7897  # set HTTP proxy
+
+# LLM Configuration
+mimi> set_provider kimi            # switch to Kimi (Moonshot AI)
+mimi> set_base_url https://api.moonshot.cn/v1/chat/completions
+mimi> set_api_key sk-xxxxxxxx...   # set Kimi API key
+mimi> set_model moonshot-v1-8k     # set Kimi model
+
+mimi> set_proxy 127.0.0.1 7897     # set HTTP proxy
 mimi> clear_proxy                  # remove proxy
 mimi> set_search_key BSA...        # set Brave Search API key
 mimi> config_show                  # show all config (masked)
@@ -145,6 +164,36 @@ To enable web search, set a [Brave Search API key](https://brave.com/search/api/
 - **Dual-core** — network I/O and AI processing run on separate CPU cores
 - **HTTP proxy** — CONNECT tunnel support for restricted networks
 - **Tool use** — ReAct agent loop with Anthropic tool use protocol
+
+## Hardware Optimization
+
+MimiClaw is tuned for low-cost ESP32-S3 boards (e.g. 4MB Flash / 2MB PSRAM):
+
+- **Partition Table** (`partitions.csv`): Custom layout designed to fit the AI agent application within **4MB Flash**.
+- **Memory Config** (`sdkconfig.defaults.esp32s3`):
+    - **Flash Mode**: Optimized for **QIO 4MB**.
+    - **PSRAM**: Configured for **Quad SPI** (more compatible than Octal) with 2MB support.
+    - **TLS/Network**: Tuned buffer sizes to minimize RAM usage without sacrificing stability.
+
+## OpenAI & Compatible Providers
+
+MimiClaw supports any provider that follows the OpenAI Chat Completions API format.
+
+**Example: OpenRouter**
+```bash
+mimi> set_provider openai
+mimi> set_base_url https://openrouter.ai/api/v1/chat/completions
+mimi> set_api_key sk-or-v1-...
+mimi> set_model anthropic/claude-3-opus
+```
+
+**Example: DeepSeek (V2)**
+```bash
+mimi> set_provider openai
+mimi> set_base_url https://api.deepseek.com/chat/completions
+mimi> set_api_key sk-ds-...
+mimi> set_model deepseek-chat
+```
 
 ## For Developers
 
