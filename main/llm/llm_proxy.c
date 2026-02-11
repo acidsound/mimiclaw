@@ -69,6 +69,16 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
 
 /* ── Init ─────────────────────────────────────────────────────── */
 
+/* ── Helper: Trim whitespace ──────────────────────────────────── */
+static void trim_inplace(char *s) {
+  char *end = s + strlen(s) - 1;
+  while (end >= s && ((unsigned char)*end <= 32)) {
+    *end-- = '\0';
+  }
+}
+
+/* ── Init ─────────────────────────────────────────────────────── */
+
 esp_err_t llm_proxy_init(void) {
   /* Start with build-time defaults */
   if (MIMI_SECRET_API_KEY[0] != '\0') {
@@ -120,6 +130,11 @@ esp_err_t llm_proxy_init(void) {
     nvs_close(nvs);
   }
 
+  /* Sanitize inputs */
+  trim_inplace(s_api_key);
+  trim_inplace(s_base_url);
+  trim_inplace(s_model);
+
   if (s_api_key[0]) {
     ESP_LOGI(TAG, "LLM initialized: provider=%d, model=%s", s_provider,
              s_model);
@@ -139,7 +154,7 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb,
       .event_handler = http_event_handler,
       .user_data = rb,
       .timeout_ms = 120 * 1000,
-      .buffer_size = 4096,
+      .buffer_size = 8192,
       .buffer_size_tx = 4096,
       .crt_bundle_attach = esp_crt_bundle_attach,
   };
@@ -157,7 +172,7 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb,
                                MIMI_LLM_API_VERSION);
   } else {
     /* OpenAI / Kimi compatible */
-    char auth[140];
+    char auth[256];
     snprintf(auth, sizeof(auth), "Bearer %s", s_api_key);
     esp_http_client_set_header(client, "Authorization", auth);
   }
@@ -435,6 +450,197 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
   return ESP_OK;
 }
 
+/* ── Helper: Tool schema conversion (Anthropic -> OpenAI) ────── */
+static cJSON *convert_anthropic_to_openai_tools(const char *tools_json) {
+  cJSON *anth_tools = cJSON_Parse(tools_json);
+  if (!anth_tools || !cJSON_IsArray(anth_tools)) {
+    cJSON_Delete(anth_tools);
+    return NULL;
+  }
+
+  cJSON *oa_tools = cJSON_CreateArray();
+  cJSON *item;
+  cJSON_ArrayForEach(item, anth_tools) {
+    cJSON *name = cJSON_GetObjectItem(item, "name");
+    cJSON *desc = cJSON_GetObjectItem(item, "description");
+    cJSON *schema = cJSON_GetObjectItem(item, "input_schema");
+
+    if (name && cJSON_IsString(name)) {
+      cJSON *func_wrapper = cJSON_CreateObject();
+      cJSON_AddStringToObject(func_wrapper, "type", "function");
+
+      cJSON *func = cJSON_CreateObject();
+      cJSON_AddStringToObject(func, "name", name->valuestring);
+      if (desc && cJSON_IsString(desc)) {
+        cJSON_AddStringToObject(func, "description", desc->valuestring);
+      }
+      if (schema) {
+        cJSON_AddItemToObject(func, "parameters", cJSON_Duplicate(schema, 1));
+      }
+
+      cJSON_AddItemToObject(func_wrapper, "function", func);
+      cJSON_AddItemToArray(oa_tools, func_wrapper);
+    }
+  }
+
+  cJSON_Delete(anth_tools);
+  return oa_tools;
+}
+
+/* ── Helper: Message conversion (Anthropic -> OpenAI) ────────── */
+static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
+  if (!anth_msgs || !cJSON_IsArray(anth_msgs))
+    return NULL;
+
+  cJSON *oa_msgs = cJSON_CreateArray();
+  cJSON *item;
+  cJSON_ArrayForEach(item, anth_msgs) {
+    cJSON *role = cJSON_GetObjectItem(item, "role");
+    cJSON *content = cJSON_GetObjectItem(item, "content");
+
+    if (!role || !cJSON_IsString(role))
+      continue;
+
+    cJSON *oa_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(oa_msg, "role", role->valuestring);
+
+    if (cJSON_IsString(content)) {
+      cJSON_AddStringToObject(oa_msg, "content", content->valuestring);
+    } else if (cJSON_IsArray(content)) {
+      /* Anthropic content array block */
+      cJSON *block;
+      cJSON_ArrayForEach(block, content) {
+        cJSON *type = cJSON_GetObjectItem(block, "type");
+        if (!type || !cJSON_IsString(type))
+          continue;
+
+        if (strcmp(type->valuestring, "text") == 0) {
+          cJSON *text = cJSON_GetObjectItem(block, "text");
+          if (text && cJSON_IsString(text)) {
+            cJSON_AddStringToObject(oa_msg, "content", text->valuestring);
+          }
+        } else if (strcmp(type->valuestring, "tool_use") == 0) {
+          /* Convert tool_use to tool_calls array */
+          cJSON *tcalls = cJSON_GetObjectItem(oa_msg, "tool_calls");
+          if (!tcalls) {
+            tcalls = cJSON_CreateArray();
+            cJSON_AddItemToObject(oa_msg, "tool_calls", tcalls);
+          }
+          cJSON *tcall = cJSON_CreateObject();
+          cJSON_AddStringToObject(tcall, "type", "function");
+          cJSON *id = cJSON_GetObjectItem(block, "id");
+          if (id)
+            cJSON_AddStringToObject(tcall, "id", id->valuestring);
+
+          cJSON *func = cJSON_CreateObject();
+          cJSON *name = cJSON_GetObjectItem(block, "name");
+          if (name)
+            cJSON_AddStringToObject(func, "name", name->valuestring);
+          cJSON *input = cJSON_GetObjectItem(block, "input");
+          if (input) {
+            char *args = cJSON_PrintUnformatted(input);
+            cJSON_AddStringToObject(func, "arguments", args);
+            free(args);
+          }
+          cJSON_AddItemToObject(tcall, "function", func);
+          cJSON_AddItemToArray(tcalls, tcall);
+        } else if (strcmp(type->valuestring, "tool_result") == 0) {
+          /* Convert tool_result to role: tool */
+          cJSON_ReplaceItemInObject(oa_msg, "role", cJSON_CreateString("tool"));
+          cJSON *id = cJSON_GetObjectItem(block, "tool_use_id");
+          if (id)
+            cJSON_AddStringToObject(oa_msg, "tool_call_id", id->valuestring);
+          cJSON *res_content = cJSON_GetObjectItem(block, "content");
+          if (res_content)
+            cJSON_AddStringToObject(oa_msg, "content",
+                                    res_content->valuestring);
+        }
+      }
+    }
+    cJSON_AddItemToArray(oa_msgs, oa_msg);
+  }
+  return oa_msgs;
+}
+
+/* ── Helper: Parse tag-based tool calls (Arcee / Trinity style) ── */
+/* Detects
+ * <|tool_call_begin|>name<|tool_call_argument_begin|>json<|tool_call_end|> */
+static void parse_tag_based_tool_calls(llm_response_t *resp) {
+  if (!resp->text || resp->text_len == 0)
+    return;
+
+  const char *p = resp->text;
+  while (resp->call_count < MIMI_MAX_TOOL_CALLS) {
+    const char *start_tag = "<|tool_call_begin|>";
+    const char *arg_tag = "<|tool_call_argument_begin|>";
+    const char *end_tag = "<|tool_call_end|>";
+
+    const char *start = strstr(p, start_tag);
+    if (!start)
+      break;
+
+    const char *name_start = start + strlen(start_tag);
+    const char *arg_start = strstr(name_start, arg_tag);
+    if (!arg_start)
+      break;
+
+    const char *arg_val_start = arg_start + strlen(arg_tag);
+    const char *end = strstr(arg_val_start, end_tag);
+    if (!end)
+      break;
+
+    llm_tool_call_t *call = &resp->calls[resp->call_count];
+
+    /* Parse Name (ignore functions. prefix and :N suffix) */
+    char full_name[64] = {0};
+    size_t nlen = arg_start - name_start;
+    if (nlen > sizeof(full_name) - 1)
+      nlen = sizeof(full_name) - 1;
+    strncpy(full_name, name_start, nlen);
+
+    const char *n = full_name;
+    if (strncmp(n, "functions.", 10) == 0)
+      n += 10;
+    char *colon = strchr(n, ':');
+    if (colon)
+      *colon = '\0';
+    strncpy(call->name, n, sizeof(call->name) - 1);
+
+    /* Parse Arguments */
+    size_t alen = end - arg_val_start;
+    call->input = calloc(1, alen + 1);
+    if (call->input) {
+      memcpy(call->input, arg_val_start, alen);
+      call->input_len = alen;
+    }
+
+    /* Assign a dummy ID if missing */
+    snprintf(call->id, sizeof(call->id), "tag_%d", resp->call_count);
+
+    resp->call_count++;
+    resp->tool_use = true;
+    p = end + strlen(end_tag);
+  }
+}
+
+/* ── Helper: Strip reasoning tags (DeepSeek-R1 style) ────────── */
+static void strip_reasoning(char *s) {
+  if (!s)
+    return;
+  char *start;
+  while ((start = strstr(s, "<think>")) != NULL) {
+    char *end = strstr(start, "</think>");
+    if (end) {
+      end += 8; /* length of </think> */
+      memmove(start, end, strlen(end) + 1);
+    } else {
+      /* Unclosed tag - just truncate for safety or leave as is?
+         Let's just remove the start tag to avoid mess. */
+      memmove(start, start + 7, strlen(start + 7) + 1);
+    }
+  }
+}
+
 /* ── Public: chat with tools (non-streaming) ──────────────────── */
 
 void llm_response_free(llm_response_t *resp) {
@@ -481,30 +687,23 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
     cJSON_AddItemToArray(messages_arr, sys_msg);
 
     if (messages) {
-      cJSON *item;
-      cJSON_ArrayForEach(item, messages) {
-        cJSON_AddItemToArray(messages_arr, cJSON_Duplicate(item, 1));
+      cJSON *oa_msgs = convert_anthropic_to_openai_messages(messages);
+      if (oa_msgs) {
+        cJSON *item;
+        cJSON_ArrayForEach(item, oa_msgs) {
+          cJSON_AddItemToArray(messages_arr, cJSON_Duplicate(item, 1));
+        }
+        cJSON_Delete(oa_msgs);
       }
     }
     cJSON_AddItemToObject(body, "messages", messages_arr);
-
-    /* Note: OpenAI tool format matches Anthropic's "tools" array structure
-       close enough for simple cases? Actually no, OpenAI uses "tools":
-       [{"type": "function", "function": ...}] Anthropic uses "tools": [{"name":
-       ..., "input_schema": ...}] Kimi might be OpenAI compatible. For this MVP,
-       we will OMIT tools for non-Anthropic to prevent errors, or user must
-       ensure tools_json is in correct format. Let's assume tools are disabled
-       or handled upstream for now for OpenAI mode unless we write a converter.
-       Kimi usually requires standard OpenAI format.
-    */
+    cJSON_AddStringToObject(body, "tool_choice", "auto");
+    /* OpenAI Tools format conversion */
     if (tools_json) {
-      /* TODO: Convert Anthropic tool schema to OpenAI if needed.
-         For now, pass-through (assuming caller handles it or features disabled)
-       */
-      cJSON *tools = cJSON_Parse(tools_json);
-      /* OpenAI expects "tools" key as well but structure differs. */
-      if (tools)
-        cJSON_AddItemToObject(body, "tools", tools);
+      cJSON *oa_tools = convert_anthropic_to_openai_tools(tools_json);
+      if (oa_tools) {
+        cJSON_AddItemToObject(body, "tools", oa_tools);
+      }
     }
   }
 
@@ -620,6 +819,77 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
 
       resp->call_count++;
     }
+  } else {
+    /* Try OpenAI style fallback (choices[0].message.content) */
+    cJSON *choices = cJSON_GetObjectItem(root, "choices");
+    if (choices && cJSON_IsArray(choices)) {
+      cJSON *first = cJSON_GetArrayItem(choices, 0);
+      if (first) {
+        cJSON *msg = cJSON_GetObjectItem(first, "message");
+        if (msg) {
+          /* Content (Text) */
+          cJSON *text = cJSON_GetObjectItem(msg, "content");
+          if (text && cJSON_IsString(text)) {
+            resp->text = strdup(text->valuestring);
+            if (resp->text) {
+              resp->text_len = strlen(resp->text);
+            }
+          }
+
+          /* Tool calls */
+          cJSON *tcalls = cJSON_GetObjectItem(msg, "tool_calls");
+          if (tcalls && cJSON_IsArray(tcalls)) {
+            resp->tool_use = true;
+            cJSON *tc;
+            cJSON_ArrayForEach(tc, tcalls) {
+              if (resp->call_count >= MIMI_MAX_TOOL_CALLS)
+                break;
+              llm_tool_call_t *call = &resp->calls[resp->call_count];
+
+              cJSON *id = cJSON_GetObjectItem(tc, "id");
+              if (id && cJSON_IsString(id)) {
+                strncpy(call->id, id->valuestring, sizeof(call->id) - 1);
+              }
+
+              cJSON *func = cJSON_GetObjectItem(tc, "function");
+              if (func) {
+                cJSON *fname = cJSON_GetObjectItem(func, "name");
+                if (fname && cJSON_IsString(fname)) {
+                  strncpy(call->name, fname->valuestring,
+                          sizeof(call->name) - 1);
+                }
+                cJSON *fargs = cJSON_GetObjectItem(func, "arguments");
+                if (fargs && cJSON_IsString(fargs)) {
+                  call->input = strdup(fargs->valuestring);
+                  call->input_len = strlen(call->input);
+                }
+              }
+              resp->call_count++;
+            }
+          }
+        }
+
+        /* finish_reason indicator for tool_use */
+        cJSON *freason = cJSON_GetObjectItem(first, "finish_reason");
+        if (freason && cJSON_IsString(freason)) {
+          if (strcmp(freason->valuestring, "tool_calls") == 0) {
+            resp->tool_use = true;
+          }
+        }
+      }
+    }
+  }
+
+  /* Post-process: Strip reasoning tags and trim */
+  if (resp->text) {
+    strip_reasoning(resp->text);
+    trim_inplace(resp->text);
+    resp->text_len = strlen(resp->text);
+  }
+
+  /* Try tag-based parsing fallback for models like Trinity */
+  if (resp->call_count == 0) {
+    parse_tag_based_tool_calls(resp);
   }
 
   cJSON_Delete(root);
@@ -641,6 +911,7 @@ esp_err_t llm_set_api_key(const char *api_key) {
   nvs_close(nvs);
 
   strncpy(s_api_key, api_key, sizeof(s_api_key) - 1);
+  trim_inplace(s_api_key);
   ESP_LOGI(TAG, "API key saved");
   return ESP_OK;
 }
@@ -653,6 +924,7 @@ esp_err_t llm_set_model(const char *model) {
   nvs_close(nvs);
 
   strncpy(s_model, model, sizeof(s_model) - 1);
+  trim_inplace(s_model);
   ESP_LOGI(TAG, "Model set to: %s", s_model);
   return ESP_OK;
 }
@@ -687,6 +959,7 @@ esp_err_t llm_set_base_url(const char *url) {
   nvs_close(nvs);
 
   strncpy(s_base_url, url, sizeof(s_base_url) - 1);
+  trim_inplace(s_base_url);
   ESP_LOGI(TAG, "Base URL set to: %s", s_base_url);
   return ESP_OK;
 }

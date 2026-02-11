@@ -195,7 +195,15 @@ MimiClaw 专为低成本 ESP32-S3 开发板（如 4MB Flash / 2MB PSRAM）进行
 
 MimiClaw 支持任何遵循 OpenAI Chat Completions API 格式的提供商。
 
-**示例：OpenRouter**
+**示例：OpenRouter (Kimi/DeepSeek/GLM)**:
+  ```bash
+  set_provider openai
+  set_base_url https://openrouter.ai/api/v1/chat/completions
+  set_api_key YOUR_OPENROUTER_KEY
+  set_model moonshotai/kimi-k2 # 或 deepseek/deepseek-r1:free, z-ai/glm-4.5-air:free
+  ```
+
+**示例：OpenRouter (Claude)**
 ```bash
 mimi> set_provider openai
 mimi> set_base_url https://openrouter.ai/api/v1/chat/completions

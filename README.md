@@ -179,7 +179,15 @@ MimiClaw is tuned for low-cost ESP32-S3 boards (e.g. 4MB Flash / 2MB PSRAM):
 
 MimiClaw supports any provider that follows the OpenAI Chat Completions API format.
 
-**Example: OpenRouter**
+**Example:- **OpenRouter (Kimi/DeepSeek/GLM)**:
+  ```bash
+  set_provider openai
+  set_base_url https://openrouter.ai/api/v1/chat/completions
+  set_api_key YOUR_OPENROUTER_KEY
+  set_model moonshotai/kimi-k2 # or deepseek/deepseek-r1:free, z-ai/glm-4.5-air:free
+  ```
+
+**Example: OpenRouter (Claude)**
 ```bash
 mimi> set_provider openai
 mimi> set_base_url https://openrouter.ai/api/v1/chat/completions

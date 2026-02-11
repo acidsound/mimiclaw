@@ -248,8 +248,28 @@ static int cmd_config_show(int argc, char **argv) {
                MIMI_SECRET_WIFI_PASS, true);
   print_config("TG Token", MIMI_NVS_TG, MIMI_NVS_KEY_TG_TOKEN,
                MIMI_SECRET_TG_TOKEN, true);
-  print_config("API Key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY,
-               MIMI_SECRET_API_KEY, true);
+
+  /* API Key with length check */
+  {
+    char key_buf[128] = {0};
+    size_t key_len = sizeof(key_buf);
+    nvs_handle_t nvs_h;
+    if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs_h) == ESP_OK) {
+      if (nvs_get_str(nvs_h, MIMI_NVS_KEY_API_KEY, key_buf, &key_len) ==
+          ESP_OK) {
+        printf("  %-14s: %.4s**** (len=%d) [NVS]\n", "API Key", key_buf,
+               (int)strlen(key_buf));
+      } else {
+        print_config("API Key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY,
+                     MIMI_SECRET_API_KEY, true);
+      }
+      nvs_close(nvs_h);
+    } else {
+      print_config("API Key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY,
+                   MIMI_SECRET_API_KEY, true);
+    }
+  }
+
   print_config("Model", MIMI_NVS_LLM, MIMI_NVS_KEY_MODEL, MIMI_SECRET_MODEL,
                false);
   print_config("Proxy Host", MIMI_NVS_PROXY, MIMI_NVS_KEY_PROXY_HOST,
