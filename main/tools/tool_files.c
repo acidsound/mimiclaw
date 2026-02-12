@@ -42,7 +42,8 @@ esp_err_t tool_read_file_execute(const char *input_json, char *output,
   const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
   if (!validate_path(path)) {
     snprintf(output, output_size,
-             "Error: path must start with /spiffs/ and must not contain '..'");
+             "Error: path must start with /spiffs/public/ and must not contain "
+             "'..'");
     cJSON_Delete(root);
     return ESP_ERR_INVALID_ARG;
   }
@@ -83,7 +84,8 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output,
 
   if (!validate_path(path)) {
     snprintf(output, output_size,
-             "Error: path must start with /spiffs/ and must not contain '..'");
+             "Error: path must start with /spiffs/public/ and must not contain "
+             "'..'");
     cJSON_Delete(root);
     return ESP_ERR_INVALID_ARG;
   }
@@ -136,7 +138,8 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output,
 
   if (!validate_path(path)) {
     snprintf(output, output_size,
-             "Error: path must start with /spiffs/ and must not contain '..'");
+             "Error: path must start with /spiffs/public/ and must not contain "
+             "'..'");
     cJSON_Delete(root);
     return ESP_ERR_INVALID_ARG;
   }

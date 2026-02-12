@@ -108,8 +108,30 @@ static void agent_loop_task(void *arg) {
 
     ESP_LOGI(TAG, "Processing message from %s:%s", msg.channel, msg.chat_id);
 
+    /* Store last active user channel/chat_id for scheduled events */
+    static char last_active_channel[16] = MIMI_CHAN_TELEGRAM;
+    static char last_active_chat_id[32] = "";
+
+    if (strcmp(msg.channel, "scheduled") == 0) {
+      if (last_active_chat_id[0] != '\0') {
+        strncpy(msg.channel, last_active_channel, sizeof(msg.channel) - 1);
+        strncpy(msg.chat_id, last_active_chat_id, sizeof(msg.chat_id) - 1);
+      } else {
+        ESP_LOGW(TAG, "Scheduled event triggered but no active chat_id");
+        free(msg.content);
+        continue;
+      }
+    } else {
+      strncpy(last_active_channel, msg.channel,
+              sizeof(last_active_channel) - 1);
+      strncpy(last_active_chat_id, msg.chat_id,
+              sizeof(last_active_chat_id) - 1);
+    }
+
     /* 1. Build system prompt */
     context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
+    ESP_LOGI(TAG, "System Prompt (first 100 bytes): %.*s...", 100,
+             system_prompt);
 
     /* 2. Load session history into cJSON array */
     session_get_history_json(msg.chat_id, history_json,
@@ -124,11 +146,14 @@ static void agent_loop_task(void *arg) {
     cJSON_AddStringToObject(user_msg, "role", "user");
     cJSON_AddStringToObject(user_msg, "content", msg.content);
     cJSON_AddItemToArray(messages, user_msg);
+    ESP_LOGI(TAG, "User Message: %s", msg.content);
 
     /* 4. ReAct loop */
     char *final_text = NULL;
     int iteration = 0;
     char tool_usage_summary[256] = {0};
+    llm_response_t resp;
+    memset(&resp, 0, sizeof(resp));
 
     while (iteration < MIMI_AGENT_MAX_TOOL_ITER) {
       /* Send "working" indicator before each API call */
@@ -150,11 +175,11 @@ static void agent_loop_task(void *arg) {
           message_bus_push_outbound(&status);
       }
 
-      llm_response_t resp;
       err = llm_chat_tools(system_prompt, messages, tools_json, &resp);
 
       if (err != ESP_OK) {
-        ESP_LOGE(TAG, "LLM call failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "LLM call failed at iter %d: %s", iteration,
+                 esp_err_to_name(err));
         break;
       }
 
@@ -193,6 +218,15 @@ static void agent_loop_task(void *arg) {
       /* Execute tools and append results */
       cJSON *tool_results =
           build_tool_results(&resp, tool_output, TOOL_OUTPUT_SIZE);
+
+      // Log tool results
+      char *res_str = cJSON_PrintUnformatted(tool_results);
+      if (res_str) {
+        ESP_LOGI(TAG, "Iteration %d Tool Results: %.*s...", iteration + 1, 200,
+                 res_str);
+        free(res_str);
+      }
+
       cJSON *result_msg = cJSON_CreateObject();
       cJSON_AddStringToObject(result_msg, "role", "user");
       cJSON_AddItemToObject(result_msg, "content", tool_results);
@@ -210,13 +244,10 @@ static void agent_loop_task(void *arg) {
       char *response_content = final_text;
       if (tool_usage_summary[0] != '\0') {
         ESP_LOGI(TAG, "Tool usage summary: %s", tool_usage_summary);
-        size_t summary_len = strlen(tool_usage_summary);
-        size_t text_len = strlen(final_text);
-        char *combined = malloc(summary_len + 1 + text_len + 1);
+        size_t slen = strlen(tool_usage_summary) + strlen(final_text) + 2;
+        char *combined = malloc(slen);
         if (combined) {
-          strcpy(combined, tool_usage_summary);
-          strcat(combined, "\n");
-          strcat(combined, final_text);
+          snprintf(combined, slen, "%s\n%s", tool_usage_summary, final_text);
           free(final_text);
           response_content = combined;
         }
@@ -233,15 +264,32 @@ static void agent_loop_task(void *arg) {
       out.content = response_content; /* transfer ownership */
       message_bus_push_outbound(&out);
     } else {
-      /* Error or empty response */
-      free(final_text);
       mimi_msg_t out = {0};
       strncpy(out.channel, msg.channel, sizeof(out.channel) - 1);
       strncpy(out.chat_id, msg.chat_id, sizeof(out.chat_id) - 1);
-      out.content = strdup("Sorry, I encountered an error.");
+      if (resp.error_msg) {
+        ESP_LOGI(TAG, "Sending LLM error to user: %s", resp.error_msg);
+        size_t elen = strlen(resp.error_msg) + 64;
+        out.content = malloc(elen);
+        if (out.content) {
+          snprintf(out.content, elen, "LLM Error: %s", resp.error_msg);
+        }
+      } else if (iteration >= MIMI_AGENT_MAX_TOOL_ITER) {
+        ESP_LOGW(TAG, "Agent reached max tool iterations (%d)",
+                 MIMI_AGENT_MAX_TOOL_ITER);
+        out.content =
+            strdup("Sorry, I reached the maximum tool reasoning depth (10 "
+                   "steps) and could not finish my response.");
+      } else {
+        out.content = strdup("Sorry, I encountered an empty or malformed "
+                             "response from the LLM.");
+      }
       if (out.content) {
         message_bus_push_outbound(&out);
       }
+      llm_response_free(&resp);
+      if (final_text)
+        free(final_text);
     }
 
     /* Free inbound message content */

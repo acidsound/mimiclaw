@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "agent/agent_loop.h"
+#include "agent/scheduler.h"
 #include "bus/message_bus.h"
 #include "cli/serial_cli.h"
 #include "gateway/ws_server.h"
@@ -140,6 +141,7 @@ void app_main(void) {
   ESP_ERROR_CHECK(tool_registry_init());
   tool_time_init();
   ESP_ERROR_CHECK(agent_loop_init());
+  scheduler_init();
 
   /* Start Serial CLI first (works without WiFi) */
   ESP_ERROR_CHECK(serial_cli_init());
