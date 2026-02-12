@@ -12,6 +12,7 @@
 > - **Kimi (Moonshot AI)** 및 **OpenAI 호환** 서비스 지원!
 > - **LLM 기반 스케줄러 (NEW!):** 텔레그램으로 "3분 뒤에 알려줘"라고 말하면 자동으로 `/spiffs/public/schedule.md`를 관리하여 알림을 줍니다.
 > - **동적 시간 주입:** LLM이 현재 시각(KST)을 항상 정확히 인지하도록 실시간 시간 주입 기능이 추가되었습니다.
+> - **오류 복구 강화:** Gemini 등 특정 모델이 반환하는 비표준 도구 호출 에러(배열 형태 등)에 대한 예외 처리를 강화하여 안정적인 중단 및 복구가 가능합니다.
 
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="480" />

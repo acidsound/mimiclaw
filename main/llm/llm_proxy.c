@@ -95,19 +95,32 @@ esp_err_t llm_proxy_init(void) {
     nvs_close(nvs);
   }
 
-  /* 2. Start with build-time defaults */
+  /* 2. Reset to defaults (to prevent leakage between profiles) */
+  memset(s_api_key, 0, sizeof(s_api_key));
+  strncpy(s_model, MIMI_LLM_DEFAULT_MODEL, sizeof(s_model) - 1);
+  memset(s_base_url, 0, sizeof(s_base_url));
+  s_provider = MIMI_LLM_DEFAULT_PROVIDER;
+
+#ifdef MIMI_SECRET_API_KEY
   if (MIMI_SECRET_API_KEY[0] != '\0') {
     strncpy(s_api_key, MIMI_SECRET_API_KEY, sizeof(s_api_key) - 1);
   }
+#endif
+#ifdef MIMI_SECRET_MODEL
   if (MIMI_SECRET_MODEL[0] != '\0') {
     strncpy(s_model, MIMI_SECRET_MODEL, sizeof(s_model) - 1);
   }
+#endif
 #ifdef MIMI_SECRET_PROVIDER
   s_provider = MIMI_SECRET_PROVIDER;
 #endif
+#ifdef MIMI_SECRET_BASE_URL
   if (MIMI_SECRET_BASE_URL[0] != '\0') {
     strncpy(s_base_url, MIMI_SECRET_BASE_URL, sizeof(s_base_url) - 1);
-  } else {
+  }
+#endif
+
+  if (s_base_url[0] == '\0') {
     /* Set default URL based on provider if not specified */
     if (s_provider == MIMI_LLM_PROVIDER_ANTHROPIC) {
       strcpy(s_base_url, MIMI_LLM_API_URL_ANTHROPIC);
@@ -156,7 +169,7 @@ esp_err_t llm_proxy_init(void) {
       strncpy(s_api_key, tmp, sizeof(s_api_key) - 1);
     }
     len = sizeof(tmp);
-    if (strcmp(s_model, MIMI_LLM_DEFAULT_MODEL) == 0) {
+    if (s_model[0] == '\0' || strcmp(s_model, MIMI_LLM_DEFAULT_MODEL) == 0) {
       if (nvs_get_str(nvs, MIMI_NVS_KEY_MODEL, tmp, &len) == ESP_OK && tmp[0]) {
         strncpy(s_model, tmp, sizeof(s_model) - 1);
       }
@@ -649,12 +662,11 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
             }
 
             if (is_gemini) {
-              /* 1. Standard OpenAI-like placement */
+              /* Gemini requires the signature in multiple places within the
+               * tool_call block */
               cJSON_AddStringToObject(tcall, "thought_signature",
                                       tsig->valuestring);
 
-              /* 2. Strict Gemini Google-Shim placement:
-               * extra_content.google.thought_signature */
               cJSON *extra = cJSON_CreateObject();
               cJSON *google = cJSON_CreateObject();
               cJSON_AddStringToObject(google, "thought_signature",
@@ -662,7 +674,6 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
               cJSON_AddItemToObject(extra, "google", google);
               cJSON_AddItemToObject(tcall, "extra_content", extra);
 
-              /* 3. Backward compat placement */
               cJSON_AddStringToObject(func, "thought_signature",
                                       tsig->valuestring);
             }
@@ -850,9 +861,15 @@ static void strip_reasoning(char *s) {
 /* ── Public: chat with tools (non-streaming) ──────────────────── */
 
 void llm_response_free(llm_response_t *resp) {
-  free(resp->text);
+  if (resp->text)
+    free(resp->text);
   resp->text = NULL;
   resp->text_len = 0;
+
+  if (resp->error_msg)
+    free(resp->error_msg);
+  resp->error_msg = NULL;
+
   for (int i = 0; i < resp->call_count; i++) {
     if (resp->calls[i].input)
       free(resp->calls[i].input);
@@ -963,6 +980,25 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
   if (!root) {
     ESP_LOGE(TAG, "Failed to parse API response JSON");
     return ESP_FAIL;
+  }
+
+  /* Extract error if any (e.g. Gemini 400 INVALID_ARGUMENT or Quota exceeded)
+   * Note: Gemini often returns an array containing the error object. */
+  cJSON *err_root = root;
+  if (cJSON_IsArray(root) && cJSON_GetArraySize(root) > 0) {
+    err_root = cJSON_GetArrayItem(root, 0);
+  }
+
+  cJSON *error = cJSON_GetObjectItem(err_root, "error");
+  if (error) {
+    cJSON *msg = cJSON_GetObjectItem(error, "message");
+    if (msg && cJSON_IsString(msg)) {
+      resp->error_msg = strdup(msg->valuestring);
+    } else if (cJSON_IsString(error)) {
+      resp->error_msg = strdup(error->valuestring);
+    }
+    cJSON_Delete(root);
+    return ESP_FAIL; // Still return fail, but now we have error_msg
   }
 
   /* stop_reason */

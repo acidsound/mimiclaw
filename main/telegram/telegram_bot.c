@@ -335,6 +335,121 @@ esp_err_t telegram_bot_start(void) {
   return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
 
+/* Simple Markdown to HTML converter for Telegram */
+static char *tg_markdown_to_html(const char *md) {
+  if (!md)
+    return NULL;
+
+  size_t in_len = strlen(md);
+  /* HTML can be larger than markdown due to tags and escaping,
+   * Allocate 2x buffer up front to avoid frequent reallocs */
+  size_t cap = in_len * 2 + 128;
+  char *out = malloc(cap);
+  if (!out)
+    return NULL;
+
+  const char *src = md;
+  char *dst = out;
+  bool bold = false, italic = false, code = false, pre = false;
+
+  while (*src) {
+    /* Safety check for buffer space */
+    if ((dst - out) + 16 >= cap) {
+      size_t offset = dst - out;
+      cap *= 2;
+      char *tmp = realloc(out, cap);
+      if (!tmp) {
+        free(out);
+        return NULL;
+      }
+      out = tmp;
+      dst = out + offset;
+    }
+
+    if (!code && !pre && strncmp(src, "```", 3) == 0) {
+      pre = true;
+      strcpy(dst, "<pre>");
+      dst += 5;
+      src += 3;
+    } else if (pre && strncmp(src, "```", 3) == 0) {
+      pre = false;
+      strcpy(dst, "</pre>");
+      dst += 6;
+      src += 3;
+    } else if (!pre && strncmp(src, "`", 1) == 0) {
+      if (!code) {
+        strcpy(dst, "<code>");
+        dst += 6;
+      } else {
+        strcpy(dst, "</code>");
+        dst += 7;
+      }
+      code = !code;
+      src += 1;
+    } else if (!code && !pre &&
+               (strncmp(src, "**", 2) == 0 || strncmp(src, "__", 2) == 0)) {
+      if (!bold) {
+        strcpy(dst, "<b>");
+        dst += 3;
+      } else {
+        strcpy(dst, "</b>");
+        dst += 4;
+      }
+      bold = !bold;
+      src += 2;
+    } else if (!code && !pre &&
+               (strncmp(src, "*", 1) == 0 || strncmp(src, "_", 1) == 0)) {
+      /* Check if it's a single marker (not part of double marker handled above)
+       */
+      if (!italic) {
+        strcpy(dst, "<i>");
+        dst += 3;
+      } else {
+        strcpy(dst, "</i>");
+        dst += 4;
+      }
+      italic = !italic;
+      src += 1;
+    } else {
+      /* Literal character with HTML escaping if not in code/pre */
+      if (*src == '<') {
+        strcpy(dst, "&lt;");
+        dst += 4;
+      } else if (*src == '>') {
+        strcpy(dst, "&gt;");
+        dst += 4;
+      } else if (*src == '&') {
+        strcpy(dst, "&amp;");
+        dst += 5;
+      } else {
+        *dst++ = *src;
+      }
+      src++;
+    }
+  }
+
+  /* Close any hanging tags */
+  if (bold) {
+    strcpy(dst, "</b>");
+    dst += 4;
+  }
+  if (italic) {
+    strcpy(dst, "</i>");
+    dst += 4;
+  }
+  if (code) {
+    strcpy(dst, "</code>");
+    dst += 7;
+  }
+  if (pre) {
+    strcpy(dst, "</pre>");
+    dst += 6;
+  }
+
+  *dst = '\0';
+  return out;
+}
+
 esp_err_t telegram_send_message(const char *chat_id, const char *text) {
   if (s_bot_token[0] == '\0') {
     ESP_LOGW(TAG, "Cannot send: no bot token");
@@ -364,8 +479,17 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text) {
     memcpy(segment, text + offset, chunk);
     segment[chunk] = '\0';
 
-    cJSON_AddStringToObject(body, "text", segment);
-    cJSON_AddStringToObject(body, "parse_mode", "Markdown");
+    /* Convert Markdown to HTML */
+    char *html_text = tg_markdown_to_html(segment);
+    if (!html_text) {
+      cJSON_Delete(body);
+      free(segment);
+      return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(body, "text", html_text);
+    cJSON_AddStringToObject(body, "parse_mode", "HTML");
+    free(html_text);
 
     char *json_str = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
@@ -375,39 +499,17 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text) {
       char *resp = tg_api_call("sendMessage", json_str);
       free(json_str);
       if (resp) {
-        /* Check for Markdown parse error, retry as plain text */
         cJSON *root = cJSON_Parse(resp);
         if (root) {
           cJSON *ok_field = cJSON_GetObjectItem(root, "ok");
           if (!cJSON_IsTrue(ok_field)) {
-            ESP_LOGW(TAG, "Markdown send failed, retrying plain");
-            cJSON_Delete(root);
-            free(resp);
-
-            /* Retry without parse_mode */
-            cJSON *body2 = cJSON_CreateObject();
-            cJSON_AddStringToObject(body2, "chat_id", chat_id);
-            char *seg2 = malloc(chunk + 1);
-            if (seg2) {
-              memcpy(seg2, text + offset, chunk);
-              seg2[chunk] = '\0';
-              cJSON_AddStringToObject(body2, "text", seg2);
-              free(seg2);
-            }
-            char *json2 = cJSON_PrintUnformatted(body2);
-            cJSON_Delete(body2);
-            if (json2) {
-              char *resp2 = tg_api_call("sendMessage", json2);
-              free(json2);
-              free(resp2);
-            }
-          } else {
-            cJSON_Delete(root);
-            free(resp);
+            cJSON *desc = cJSON_GetObjectItem(root, "description");
+            ESP_LOGW(TAG, "HTML send failed: %s",
+                     desc ? desc->valuestring : "unknown");
           }
-        } else {
-          free(resp);
+          cJSON_Delete(root);
         }
+        free(resp);
       }
     }
 

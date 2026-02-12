@@ -12,6 +12,7 @@
 > - Support for **Kimi (Moonshot AI)** and **OpenAI-compatible** providers!
 > - **LLM-Powered Scheduler (NEW!):** Simply say "Remind me in 3 minutes" on Telegram, and Mimi will automatically manage `/spiffs/public/schedule.md` to trigger alarms.
 > - **Real-time Time Injection:** Enhanced time awareness by injecting the current system time (KST) directly into the LLM context.
+> - **Robust Error Recovery:** Added specialized handling for non-standard tool-calling errors (e.g., Gemini's array-wrapped errors) to ensure stable agent turn recovery.
 
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="480" />
