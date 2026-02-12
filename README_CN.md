@@ -8,11 +8,10 @@
 **[English](README.md) | [中文](README_CN.md)**
 
 > [!IMPORTANT]
-> **v0.2.0 新功能：** 现已支持 **Kimi (Moonshot AI)** 和 **OpenAI 兼容** 的提供商！
-> 通过 CLI 即可切换：`set_provider kimi` 或 `set_provider openai`。
->
-> **支持 OpenRouter, DeepSeek 等！**
-> 只需将提供商设为 `openai` 并更改 `base_url`。
+> **v0.2.0 新功能：**
+> - 支持 **Kimi (Moonshot AI)** 和 **OpenAI 兼容** 的提供商！
+> - **LLM 驱动调度器 (NEW!):** 在 Telegram 上说“3 分钟后提醒我”，Mimi 会自动管理 `/spiffs/public/schedule.md` 来触发闹钟。
+> - **实时时间注入:** 通过将当前系统时间（KST）直接注入 LLM 上下文，增强了时间感知能力。
 
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="480" />

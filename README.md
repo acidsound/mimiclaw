@@ -8,11 +8,10 @@
 **[English](README_EN.md) | 한국어 | [中文](README_CN.md)**
 
 > [!IMPORTANT]
-> **v0.2.0 신규 기능:** 이제 **Kimi (Moonshot AI)** 및 **OpenAI 호환** 서비스를 지원합니다!
-> CLI를 통해 즉시 전환 가능: `set_provider kimi` 또는 `set_provider openai`.
->
-> **OpenRouter, DeepSeek 등과 연동 가능!**
-> 프로바이더를 `openai`로 설정하고 `base_url`만 변경하면 됩니다.
+> **v0.2.0 신규 기능:**
+> - **Kimi (Moonshot AI)** 및 **OpenAI 호환** 서비스 지원!
+> - **LLM 기반 스케줄러 (NEW!):** 텔레그램으로 "3분 뒤에 알려줘"라고 말하면 자동으로 `/spiffs/public/schedule.md`를 관리하여 알림을 줍니다.
+> - **동적 시간 주입:** LLM이 현재 시각(KST)을 항상 정확히 인지하도록 실시간 시간 주입 기능이 추가되었습니다.
 
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="480" />

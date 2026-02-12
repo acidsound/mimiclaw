@@ -8,11 +8,10 @@
 **English | [한국어](README.md) | [中文](README_CN.md)**
 
 > [!IMPORTANT]
-> **New in v0.2.0:** Now supports **Kimi (Moonshot AI)** and **OpenAI-compatible** providers!
-> Switch instantly via CLI: `set_provider kimi` or `set_provider openai`.
->
-> **Works with OpenRouter, DeepSeek, and more!**
-> Just set the provider to `openai` and change the `base_url`.
+> **New in v0.2.0:**
+> - Support for **Kimi (Moonshot AI)** and **OpenAI-compatible** providers!
+> - **LLM-Powered Scheduler (NEW!):** Simply say "Remind me in 3 minutes" on Telegram, and Mimi will automatically manage `/spiffs/public/schedule.md` to trigger alarms.
+> - **Real-time Time Injection:** Enhanced time awareness by injecting the current system time (KST) directly into the LLM context.
 
 <p align="center">
   <img src="assets/banner.png" alt="MimiClaw" width="480" />

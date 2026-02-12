@@ -83,10 +83,6 @@
 
 ## P2 — Advanced Features
 
-### [ ] Cron Scheduled Task Service
-- **nanobot**: `cron/service.py` — full cron scheduler supporting at/every/cron expressions, persistent storage, timed agent triggers
-- **MimiClaw**: Not implemented
-- **Recommendation**: Use FreeRTOS timer for simplified version, support "every N minutes" only
 
 ### [ ] Heartbeat Service
 - **nanobot**: `heartbeat/service.py` — reads HEARTBEAT.md every 30 minutes, triggers agent if tasks are found
@@ -153,6 +149,10 @@
 - [x] Multi-LLM Provider Support (Anthropic, Kimi, OpenAI-compatible)
 - [x] Secure `http_request` Tool (SSRF protection, secret substitution, cookies)
 - [x] Wake-On-LAN & Background Device Discovery
+- [x] LLM-Powered Scheduler (NEW!)
+    - Periodically checks `/spiffs/public/schedule.md` and triggers agent turns.
+- [x] Dynamic Time Awareness
+    - Injects current localized time (KST) into system prompt for relative time calculations.
 
 ---
 

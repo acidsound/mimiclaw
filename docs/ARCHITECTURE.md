@@ -165,6 +165,7 @@ main/
 |--------------------|------|----------|--------|--------------------------------------|
 | `tg_poll`          | 0    | 5        | 12 KB  | Telegram long polling (30s timeout)  |
 | `agent_loop`       | 1    | 6        | 12 KB  | Message processing + Claude API call |
+| `scheduler`        | 0    | 5        | 4 KB   | Periodically checks /spiffs/public/schedule.md |
 | `discovery`        | 0    | 4        | 4 KB   | Background ICMP subnet scanner       |
 | `outbound`         | 0    | 5        | 8 KB   | Route responses to Telegram / WS     |
 | `serial_cli`       | 0    | 3        | 4 KB   | USB serial console REPL              |
@@ -218,6 +219,7 @@ SPIFFS is a flat filesystem — no real directories. Files use path-like names.
 /spiffs/public/SOUL.md            AI personality definition
 /spiffs/public/USER.md            User profile
 /spiffs/public/MEMORY.md          Long-term persistent memory
+/spiffs/public/schedule.md        Scheduled tasks (NEW!)
 /spiffs/private/SECRET.env        API keys for http_request tool
 /spiffs/private/SESSIONS.json     HTTP session cookies
 /spiffs/private/history/*.jsonl   Session history (ring-buffer)
