@@ -48,9 +48,9 @@ Telegram App (User)
 │                                                   │
 │   ┌──────────────────────────────────────────┐    │
 │   │  SPIFFS (12 MB)                          │    │
-│   │  /spiffs/config/  SOUL.md, USER.md       │    │
-│   │  /spiffs/memory/  MEMORY.md, YYYY-MM-DD  │    │
-│   │  /spiffs/sessions/ tg_<chat_id>.jsonl    │    │
+│   │  /spiffs/public/   SOUL.md, MEMORY.md    │    │
+│   │  /spiffs/private/  SECRET.env, SESSIONS  │    │
+│   │  /history/         tg_<chat_id>.jsonl    │    │
 │   └──────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────┘
          │
@@ -125,14 +125,20 @@ main/
 ├── tools/
 │   ├── tool_registry.h     Tool definition struct, register/dispatch API
 │   ├── tool_registry.c     Tool registration, JSON schema builder, dispatch by name
-│   ├── tool_web_search.h   Web search tool API
+│   ├── tool_http.c         Hardened HTTP requester (SSRF, secrets, cookies)
+│   ├── tool_discovery.c    WOL sender + Background ICMP scanner
+│   ├── tool_system.c       heap_info, restart implementation
 │   └── tool_web_search.c   Brave Search API via HTTPS (direct + proxy)
+│
+├── utils/
+│   ├── log_redact.h        Log redaction API
+│   └── log_redact.c        Masks sensitive data in console output
 │
 ├── memory/
 │   ├── memory_store.h      Long-term + daily memory API
 │   ├── memory_store.c      MEMORY.md read/write, daily .md append/read
 │   ├── session_mgr.h       Per-chat session API
-│   └── session_mgr.c       JSONL session files, ring buffer history
+│   └── session_mgr.c       JSONL session files,リングバッファ history
 │
 ├── gateway/
 │   ├── ws_server.h         WebSocket server API
@@ -144,7 +150,7 @@ main/
 │
 ├── cli/
 │   ├── serial_cli.h        CLI init API
-│   └── serial_cli.c        esp_console REPL with debug/maintenance commands
+│   └── serial_cli.c        REPL with config management (tg_auth_add, etc.)
 │
 └── ota/
     ├── ota_manager.h       OTA update API
@@ -159,6 +165,7 @@ main/
 |--------------------|------|----------|--------|--------------------------------------|
 | `tg_poll`          | 0    | 5        | 12 KB  | Telegram long polling (30s timeout)  |
 | `agent_loop`       | 1    | 6        | 12 KB  | Message processing + Claude API call |
+| `discovery`        | 0    | 4        | 4 KB   | Background ICMP subnet scanner       |
 | `outbound`         | 0    | 5        | 8 KB   | Route responses to Telegram / WS     |
 | `serial_cli`       | 0    | 3        | 4 KB   | USB serial console REPL              |
 | httpd (internal)   | 0    | 5        | —      | WebSocket server (esp_http_server)   |
@@ -208,11 +215,12 @@ Total: 16 MB flash.
 SPIFFS is a flat filesystem — no real directories. Files use path-like names.
 
 ```
-/spiffs/config/SOUL.md          AI personality definition
-/spiffs/config/USER.md          User profile
-/spiffs/memory/MEMORY.md        Long-term persistent memory
-/spiffs/memory/2026-02-05.md    Daily notes (one file per day)
-/spiffs/sessions/tg_12345.jsonl Session history (one file per Telegram chat)
+/spiffs/public/SOUL.md            AI personality definition
+/spiffs/public/USER.md            User profile
+/spiffs/public/MEMORY.md          Long-term persistent memory
+/spiffs/private/SECRET.env        API keys for http_request tool
+/spiffs/private/SESSIONS.json     HTTP session cookies
+/spiffs/private/history/*.jsonl   Session history (ring-buffer)
 ```
 
 Session files are JSONL (one JSON object per line):
@@ -225,20 +233,22 @@ Session files are JSONL (one JSON object per line):
 
 ## Configuration
 
-All configuration is done exclusively through `mimi_secrets.h` at build time. There is no runtime configuration — changing any setting requires `idf.py fullclean && idf.py build`.
+MimiClaw implements a **two-layer configuration** system:
+1. **Build-time Secrets**: Defined in `mimi_secrets.h` (lowest priority).
+2. **NVS Overrides**: Set via Serial CLI (highest priority).
 
-| Define                       | Description                             |
-|------------------------------|-----------------------------------------|
-| `MIMI_SECRET_WIFI_SSID`     | WiFi SSID                               |
-| `MIMI_SECRET_WIFI_PASS`     | WiFi password                           |
-| `MIMI_SECRET_TG_TOKEN`      | Telegram Bot API token                  |
-| `MIMI_SECRET_API_KEY`       | Anthropic API key                       |
-| `MIMI_SECRET_MODEL`         | Model ID (default: claude-opus-4-6)     |
-| `MIMI_SECRET_PROXY_HOST`    | HTTP proxy hostname/IP (optional)       |
-| `MIMI_SECRET_PROXY_PORT`    | HTTP proxy port (optional)              |
-| `MIMI_SECRET_SEARCH_KEY`    | Brave Search API key (optional)         |
+| Key                    | CLI Command             | Description                    |
+|------------------------|-------------------------|--------------------------------|
+| WiFi SSID              | `wifi_set <S> <P>`      | WiFi Network name              |
+| Bot Token              | `set_tg_token <T>`      | Telegram Bot API Token         |
+| API Key                | `set_api_key <K>`       | Provider API Key               |
+| Base URL               | `set_base_url <U>`      | API endpoint                   |
+| Provider               | `set_provider <P>`      | `anthropic` or `openai`        |
+| Proxy                  | `set_proxy <H> <P>`     | HTTP Proxy settings            |
+| Search Key             | `set_search_key <K>`    | Brave Search API key           |
+| Telegram Auth          | `tg_auth_add <ID>`      | Authorize a Telegram Chat ID   |
 
-NVS is still initialized (required by ESP-IDF WiFi internals) but is not used for application configuration.
+Settings applied via CLI are persisted in NVS and survive reboots/firmware updates.
 
 ---
 

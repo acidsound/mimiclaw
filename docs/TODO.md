@@ -33,10 +33,9 @@
 
 ## P1 — Important Features
 
-### [ ] Telegram User Allowlist (allow_from)
-- **nanobot**: `channels/base.py` L59-82 — `is_allowed()` checks sender_id against allow_list
-- **MimiClaw**: No authentication; anyone can message the bot and consume API credits
-- **Recommendation**: Store allow_from list in `mimi_secrets.h` as a build-time define, filter in `process_updates()`
+### [x] ~~Telegram User Allowlist (tg_auth)~~
+- Implemented: Chat ID allowlist stored in NVS, managed via Serial CLI (`tg_auth_add/list/remove`).
+- "Break-glass" admin ID support.
 
 ### [ ] Telegram Markdown to HTML Conversion
 - **nanobot**: `channels/telegram.py` L16-76 — `_markdown_to_telegram_html()` full converter: code blocks, inline code, bold, italic, links, strikethrough, lists
@@ -94,10 +93,9 @@
 - **MimiClaw**: Not implemented
 - **Recommendation**: Simple FreeRTOS timer that periodically checks HEARTBEAT.md
 
-### [ ] Multi-LLM Provider Support
-- **nanobot**: `providers/litellm_provider.py` — supports OpenRouter, Anthropic, OpenAI, Gemini, DeepSeek, Groq, Zhipu, vLLM via LiteLLM
-- **MimiClaw**: Hardcoded to Anthropic Messages API
-- **Recommendation**: Abstract LLM interface, support OpenAI-compatible API (most providers are compatible)
+### [x] ~~Multi-LLM Provider Support~~
+- Implemented: Support for Anthropic, Kimi (Moonshot), and any OpenAI-compatible provider (OpenRouter, DeepSeek, etc.).
+- Switchable via CLI: `set_provider`, `set_base_url`.
 
 ### [ ] Voice Transcription
 - **nanobot**: `providers/transcription.py` — Groq Whisper API
@@ -148,8 +146,13 @@
 - [x] HTTP CONNECT Proxy (Telegram + Claude API + Brave Search via proxy tunnel)
 - [x] OTA Update
 - [x] WiFi Manager (build-time credentials, exponential backoff)
-- [x] SPIFFS storage
+- [x] SPIFFS storage with directory isolation (`/public` vs `/private`)
 - [x] Build-time config (`mimi_secrets.h`) + runtime NVS override via CLI
+- [x] Log Redaction (masking secrets/tokens in logs)
+- [x] Telegram User Authorization (NVS-based allowlist + CLI commands)
+- [x] Multi-LLM Provider Support (Anthropic, Kimi, OpenAI-compatible)
+- [x] Secure `http_request` Tool (SSRF protection, secret substitution, cookies)
+- [x] Wake-On-LAN & Background Device Discovery
 
 ---
 

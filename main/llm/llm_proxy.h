@@ -31,6 +31,7 @@ esp_err_t llm_set_provider(int provider);
  * Save the base URL to NVS.
  */
 esp_err_t llm_set_base_url(const char *url);
+esp_err_t llm_set_timezone(const char *tz);
 
 /**
  * Send a chat completion request to Anthropic Messages API (streaming).

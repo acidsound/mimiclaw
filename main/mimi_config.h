@@ -59,7 +59,8 @@
 #define MIMI_MAX_TOOL_CALLS 4
 
 /* Timezone (POSIX TZ format) */
-#define MIMI_TIMEZONE "PST8PDT,M3.2.0,M11.1.0"
+/* Timezone (POSIX TZ format): Asia/Seoul is KST-9 */
+#define MIMI_TIMEZONE "KST-9"
 
 /* LLM */
 /* LLM Providers */
@@ -83,12 +84,20 @@
 
 /* Memory / SPIFFS */
 #define MIMI_SPIFFS_BASE "/spiffs"
-#define MIMI_SPIFFS_CONFIG_DIR "/spiffs/config"
-#define MIMI_SPIFFS_MEMORY_DIR "/spiffs/memory"
-#define MIMI_SPIFFS_SESSION_DIR "/spiffs/sessions"
-#define MIMI_MEMORY_FILE "/spiffs/memory/MEMORY.md"
-#define MIMI_SOUL_FILE "/spiffs/config/SOUL.md"
-#define MIMI_USER_FILE "/spiffs/config/USER.md"
+#define MIMI_SPIFFS_PUBLIC_DIR "/spiffs/public"
+#define MIMI_SPIFFS_PRIVATE_DIR "/spiffs/private"
+
+/* Public files (LLM accessible) */
+#define MIMI_MEMORY_FILE "/spiffs/public/MEMORY.md"
+#define MIMI_SOUL_FILE "/spiffs/public/SOUL.md"
+#define MIMI_USER_FILE "/spiffs/public/USER.md"
+
+/* Private files (Hidden from LLM) */
+#define MIMI_SECRET_FILE "/spiffs/private/SECRET.env"
+#define MIMI_SESSION_DB "/spiffs/private/SESSIONS.json"
+#define MIMI_WOL_DEVICES_FILE "/spiffs/private/wol_devices.json"
+#define MIMI_SPIFFS_HISTORY_DIR "/spiffs/h"
+
 #define MIMI_CONTEXT_BUF_SIZE (16 * 1024)
 #define MIMI_SESSION_MAX_MSGS 20
 
@@ -118,3 +127,7 @@
 #define MIMI_NVS_KEY_PROXY_PORT "port"
 #define MIMI_NVS_KEY_PROVIDER "provider"
 #define MIMI_NVS_KEY_BASE_URL "base_url"
+#define MIMI_NVS_KEY_TIMEZONE "timezone"
+
+/* Custom Error Codes */
+#define ESP_ERR_ADMISSION_CONTROL 0x10B

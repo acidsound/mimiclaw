@@ -25,3 +25,9 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text);
  */
 esp_err_t telegram_set_token(const char *token);
 
+/**
+ * Authorization management.
+ */
+esp_err_t telegram_auth_add(int64_t chat_id);
+esp_err_t telegram_auth_remove(int64_t chat_id);
+void telegram_auth_list(void);

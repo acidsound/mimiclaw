@@ -141,6 +141,9 @@ mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 **调试与运维：**
 
 ```
+mimi> ls [path]                # 查看文件列表 (例如: ls public)
+mimi> cat <path>               # 查看文件内容 (支持分页)
+mimi> rm <path>                # 删除文件 (例如: rm public/temp.md)
 mimi> wifi_status              # 连上了吗？
 mimi> memory_read              # 看看它记住了什么
 mimi> memory_write "内容"       # 写入 MEMORY.md

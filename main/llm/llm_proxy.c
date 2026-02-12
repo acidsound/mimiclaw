@@ -139,6 +139,16 @@ esp_err_t llm_proxy_init(void) {
     ESP_LOGI(TAG, "LLM initialized: provider=%d, model=%s", s_provider,
              s_model);
     ESP_LOGI(TAG, "Base URL: %s", s_base_url);
+
+    /* Timezone info check from NVS */
+    char tz[64] = {0};
+    size_t tz_len = sizeof(tz);
+    if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs) == ESP_OK) {
+      if (nvs_get_str(nvs, MIMI_NVS_KEY_TIMEZONE, tz, &tz_len) == ESP_OK) {
+        ESP_LOGI(TAG, "TimeZone (NVS): %s", tz);
+      }
+      nvs_close(nvs);
+    }
   } else {
     ESP_LOGW(TAG, "No API key. Use CLI: set_api_key <KEY>");
   }
@@ -175,6 +185,12 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb,
     char auth[256];
     snprintf(auth, sizeof(auth), "Bearer %s", s_api_key);
     esp_http_client_set_header(client, "Authorization", auth);
+
+    if (strstr(s_base_url, "openrouter.ai")) {
+      esp_http_client_set_header(client, "HTTP-Referer",
+                                 "https://github.com/acidsound/mimiclaw");
+      esp_http_client_set_header(client, "X-Title", "MimiClaw");
+    }
   }
 
   esp_http_client_set_post_field(client, post_data, strlen(post_data));
@@ -217,7 +233,7 @@ static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb,
     return ESP_ERR_HTTP_CONNECT;
 
   int body_len = strlen(post_data);
-  char header[512];
+  char header[1024];
   int hlen = 0;
 
   if (s_provider == MIMI_LLM_PROVIDER_ANTHROPIC) {
@@ -233,14 +249,22 @@ static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb,
   } else {
     char auth[140];
     snprintf(auth, sizeof(auth), "Bearer %s", s_api_key);
+
+    const char *or_headers = "";
+    if (strstr(s_base_url, "openrouter.ai")) {
+      or_headers = "HTTP-Referer: https://github.com/acidsound/mimiclaw\r\n"
+                   "X-Title: MimiClaw\r\n";
+    }
+
     hlen = snprintf(header, sizeof(header),
                     "POST %s HTTP/1.1\r\n"
                     "Host: %s\r\n"
                     "Content-Type: application/json\r\n"
                     "Authorization: %s\r\n"
+                    "%s"
                     "Content-Length: %d\r\n"
                     "Connection: close\r\n\r\n",
-                    path, host, auth, body_len);
+                    path, host, auth, or_headers, body_len);
   }
 
   if (proxy_conn_write(conn, header, hlen) < 0 ||
@@ -399,8 +423,10 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     return ESP_ERR_NO_MEM;
   }
 
-  ESP_LOGI(TAG, "Calling Claude API (model: %s, body: %d bytes)", s_model,
-           (int)strlen(post_data));
+  ESP_LOGI(TAG, "[LLM_CALL] provider=%s, model=%s, body=%d bytes",
+           (s_provider == MIMI_LLM_PROVIDER_ANTHROPIC) ? "Anthropic"
+                                                       : "OpenAI/Kimi",
+           s_model, (int)strlen(post_data));
 
   resp_buf_t rb;
   if (resp_buf_init(&rb, MIMI_LLM_STREAM_BUF_SIZE) != ESP_OK) {
@@ -420,6 +446,9 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
              esp_err_to_name(err));
     return err;
   }
+
+  /* Raw response logging */
+  /* Log cleaned up in unified block later */
 
   if (status != 200) {
     ESP_LOGE(TAG, "API returned status %d", status);
@@ -557,9 +586,92 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
         }
       }
     }
+
+    /* Strict providers (like Arcee via OpenRouter) require "content" field
+     * even if null when tool_calls is present. */
+    if (strcmp(role->valuestring, "assistant") == 0 &&
+        !cJSON_GetObjectItem(oa_msg, "content")) {
+      cJSON_AddNullToObject(oa_msg, "content");
+    }
+
     cJSON_AddItemToArray(oa_msgs, oa_msg);
   }
   return oa_msgs;
+}
+
+/* ── Helper: Parse pseudo-tag tool calls [name(args)] or [name] ── */
+static void parse_pseudotag_tool_calls(llm_response_t *resp) {
+  if (!resp->text || resp->text_len == 0)
+    return;
+
+  const char *p = resp->text;
+  while (resp->call_count < MIMI_MAX_TOOL_CALLS) {
+    const char *start = strchr(p, '[');
+    if (!start)
+      break;
+    const char *end = strchr(start, ']');
+    if (!end)
+      break;
+
+    /* Check if it's strictly [NAME] or [NAME(ARGS)] */
+    if (end - start < 3) {
+      p = end + 1;
+      continue;
+    }
+
+    llm_tool_call_t *call = &resp->calls[resp->call_count];
+
+    const char *lp = strchr(start, '(');
+    if (lp && lp < end) {
+      /* name(args) */
+      size_t nlen = lp - start - 1;
+      char full_name[64] = {0};
+      if (nlen >= sizeof(full_name))
+        nlen = sizeof(full_name) - 1;
+      strncpy(full_name, start + 1, nlen);
+
+      const char *n = full_name;
+      if (strncmp(n, "functions.", 10) == 0)
+        n += 10;
+      char *colon = strchr(n, ':');
+      if (colon)
+        *colon = '\0';
+      strncpy(call->name, n, sizeof(call->name) - 1);
+
+      const char *rp = strchr(lp, ')');
+      if (rp && rp <= end) {
+        size_t alen = rp - lp - 1;
+        call->input = calloc(1, alen + 1);
+        if (call->input) {
+          memcpy(call->input, lp + 1, alen);
+          call->input_len = alen;
+        }
+      }
+    } else {
+      /* [name] */
+      size_t nlen = end - start - 1;
+      char full_name[64] = {0};
+      if (nlen >= sizeof(full_name))
+        nlen = sizeof(full_name) - 1;
+      strncpy(full_name, start + 1, nlen);
+
+      const char *n = full_name;
+      if (strncmp(n, "functions.", 10) == 0)
+        n += 10;
+      char *colon = strchr(n, ':');
+      if (colon)
+        *colon = '\0';
+      strncpy(call->name, n, sizeof(call->name) - 1);
+
+      call->input = strdup("{}");
+      call->input_len = 2;
+    }
+
+    snprintf(call->id, sizeof(call->id), "pseudo_%d", resp->call_count);
+    resp->call_count++;
+    resp->tool_use = true;
+    p = end + 1;
+  }
 }
 
 /* ── Helper: Parse tag-based tool calls (Arcee / Trinity style) ── */
@@ -667,7 +779,10 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
   cJSON_AddStringToObject(body, "model", s_model);
   cJSON_AddNumberToObject(body, "max_tokens", MIMI_LLM_MAX_TOKENS);
 
-  if (s_provider == MIMI_LLM_PROVIDER_ANTHROPIC) {
+  /* Provider is now explicit (no auto-detection) */
+  int provider = s_provider;
+
+  if (provider == MIMI_LLM_PROVIDER_ANTHROPIC) {
     cJSON_AddStringToObject(body, "system", system_prompt);
     cJSON *msgs_copy = cJSON_Duplicate(messages, 1);
     cJSON_AddItemToObject(body, "messages", msgs_copy);
@@ -712,8 +827,11 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
   if (!post_data)
     return ESP_ERR_NO_MEM;
 
-  ESP_LOGI(TAG, "Calling Claude API with tools (model: %s, body: %d bytes)",
-           s_model, (int)strlen(post_data));
+  ESP_LOGI(TAG, "[LLM_CALL] provider=%s, model=%s, body=%d bytes, tools=%d",
+           (provider == MIMI_LLM_PROVIDER_ANTHROPIC) ? "Anthropic"
+                                                     : "OpenAI/Compatible",
+           s_model, (int)strlen(post_data),
+           tools_json ? cJSON_GetArraySize(cJSON_Parse(tools_json)) : 0);
 
   /* HTTP call */
   resp_buf_t rb;
@@ -731,6 +849,9 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
     resp_buf_free(&rb);
     return err;
   }
+
+  /* Raw response logging */
+  /* Log cleaned up in unified block later */
 
   if (status != 200) {
     ESP_LOGE(TAG, "API error %d: %.500s", status, rb.data ? rb.data : "");
@@ -887,12 +1008,24 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
     resp->text_len = strlen(resp->text);
   }
 
-  /* Try tag-based parsing fallback for models like Trinity */
+  /* Always log first 500 chars of raw response while debugging */
+  const char *raw_ptr = rb.data ? rb.data : "NULL";
+  if (rb.data) {
+    while (*raw_ptr && (unsigned char)*raw_ptr <= 32) {
+      raw_ptr++;
+    }
+  }
+  ESP_LOGI(TAG, "[LLM_RAW] %.*s", 500, raw_ptr);
+
   if (resp->call_count == 0) {
     parse_tag_based_tool_calls(resp);
+    if (resp->call_count == 0) {
+      parse_pseudotag_tool_calls(resp);
+    }
   }
 
   cJSON_Delete(root);
+  resp_buf_free(&rb);
 
   ESP_LOGI(TAG, "Response: %d bytes text, %d tool calls, stop=%s",
            (int)resp->text_len, resp->call_count,
@@ -961,5 +1094,18 @@ esp_err_t llm_set_base_url(const char *url) {
   strncpy(s_base_url, url, sizeof(s_base_url) - 1);
   trim_inplace(s_base_url);
   ESP_LOGI(TAG, "Base URL set to: %s", s_base_url);
+  return ESP_OK;
+}
+
+esp_err_t llm_set_timezone(const char *tz) {
+  nvs_handle_t nvs;
+  if (nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs) != ESP_OK) {
+    return ESP_FAIL;
+  }
+  nvs_set_str(nvs, MIMI_NVS_KEY_TIMEZONE, tz);
+  nvs_commit(nvs);
+  nvs_close(nvs);
+
+  ESP_LOGI(TAG, "Timezone saved: %s", tz);
   return ESP_OK;
 }

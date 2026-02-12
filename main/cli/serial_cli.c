@@ -5,6 +5,7 @@
 #include "mimi_config.h"
 #include "proxy/http_proxy.h"
 #include "telegram/telegram_bot.h"
+#include "tools/tool_registry.h"
 #include "tools/tool_web_search.h"
 #include "wifi/wifi_manager.h"
 
@@ -14,11 +15,22 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "nvs.h"
-#include "nvs_flash.h"
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 static const char *TAG = "cli";
+
+static void resolve_path(const char *input, char *output, size_t size) {
+  if (input[0] == '/') {
+    snprintf(output, size, "%s", input);
+  } else {
+    snprintf(output, size, "%s/%s", MIMI_SPIFFS_BASE, input);
+  }
+}
 
 /* --- wifi_set command --- */
 static struct {
@@ -297,6 +309,8 @@ static int cmd_config_show(int argc, char **argv) {
 
   print_config("Base URL", MIMI_NVS_LLM, MIMI_NVS_KEY_BASE_URL,
                MIMI_SECRET_BASE_URL, false);
+  print_config("Timezone", MIMI_NVS_LLM, MIMI_NVS_KEY_TIMEZONE, MIMI_TIMEZONE,
+               false);
   print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,
                MIMI_SECRET_SEARCH_KEY, true);
   printf("=============================\n");
@@ -317,6 +331,48 @@ static int cmd_config_reset(int argc, char **argv) {
   }
   printf(
       "All NVS config cleared. Build-time defaults will be used on restart.\n");
+  return 0;
+}
+
+/* --- tg_auth_add command --- */
+static struct {
+  struct arg_str *chat_id;
+  struct arg_end *end;
+} tg_auth_add_args;
+
+static int cmd_tg_auth_add(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&tg_auth_add_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, tg_auth_add_args.end, argv[0]);
+    return 1;
+  }
+  int64_t cid = atoll(tg_auth_add_args.chat_id->sval[0]);
+  telegram_auth_add(cid);
+  printf("Chat %lld authorized.\n", cid);
+  return 0;
+}
+
+/* --- tg_auth_remove command --- */
+static struct {
+  struct arg_str *chat_id;
+  struct arg_end *end;
+} tg_auth_remove_args;
+
+static int cmd_tg_auth_remove(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&tg_auth_remove_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, tg_auth_remove_args.end, argv[0]);
+    return 1;
+  }
+  int64_t cid = atoll(tg_auth_remove_args.chat_id->sval[0]);
+  telegram_auth_remove(cid);
+  printf("Chat %lld deauthorized.\n", cid);
+  return 0;
+}
+
+/* --- tg_auth_list command --- */
+static int cmd_tg_auth_list(int argc, char **argv) {
+  telegram_auth_list();
   return 0;
 }
 
@@ -371,6 +427,226 @@ static int cmd_set_base_url(int argc, char **argv) {
   }
   llm_set_base_url(base_url_args.url->sval[0]);
   printf("Base URL saved.\n");
+  return 0;
+}
+
+/* --- set_timezone command --- */
+static struct {
+  struct arg_str *tz;
+  struct arg_end *end;
+} timezone_args;
+
+static int cmd_set_timezone(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&timezone_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, timezone_args.end, argv[0]);
+    return 1;
+  }
+  llm_set_timezone(timezone_args.tz->sval[0]);
+  printf("Timezone set to %s. Restart to apply to SNTP.\n",
+         timezone_args.tz->sval[0]);
+  return 0;
+}
+
+/* --- clear_history command --- */
+static int cmd_clear_history(int argc, char **argv) {
+  DIR *dir = opendir(MIMI_SPIFFS_BASE "/h");
+  if (!dir) {
+    printf("Error: history directory not found.\n");
+    return 1;
+  }
+  struct dirent *ent;
+  while ((ent = readdir(dir)) != NULL) {
+    if (ent->d_type == DT_REG) {
+      char path[300];
+      snprintf(path, sizeof(path), MIMI_SPIFFS_BASE "/h/%s", ent->d_name);
+      unlink(path);
+    }
+  }
+  closedir(dir);
+  printf("Session history cleared.\n");
+  return 0;
+}
+
+/* --- ls command --- */
+static struct {
+  struct arg_str *path;
+  struct arg_end *end;
+} ls_args;
+
+static int cmd_ls(int argc, char **argv) {
+  arg_parse(argc, argv, (void **)&ls_args);
+  char target_dir[256];
+  if (ls_args.path->count > 0) {
+    resolve_path(ls_args.path->sval[0], target_dir, sizeof(target_dir));
+  } else {
+    strcpy(target_dir, MIMI_SPIFFS_BASE);
+  }
+
+  /* SPIFFS is often flat, but we simulate directories by prefix filtering */
+  DIR *dir = opendir(MIMI_SPIFFS_BASE);
+  if (!dir) {
+    perror("ls failed");
+    return 1;
+  }
+  struct dirent *ent;
+  printf("Listing %s:\n", target_dir);
+  while ((ent = readdir(dir)) != NULL) {
+    struct stat st;
+    char full_path[512];
+    snprintf(full_path, sizeof(full_path), "%s/%s", MIMI_SPIFFS_BASE,
+             ent->d_name);
+
+    /* If target_dir is not the root, filter by prefix */
+    if (strcmp(target_dir, MIMI_SPIFFS_BASE) != 0) {
+      if (strncmp(full_path, target_dir, strlen(target_dir)) != 0) {
+        continue;
+      }
+    }
+
+    stat(full_path, &st);
+    if (S_ISDIR(st.st_mode)) {
+      printf("  [DIR]  %s\n", ent->d_name);
+    } else {
+      printf("  %-16s  %ld bytes\n", ent->d_name, (long)st.st_size);
+    }
+  }
+  closedir(dir);
+  return 0;
+}
+
+/* --- cat command (with paging) --- */
+static struct {
+  struct arg_str *path;
+  struct arg_end *end;
+} cat_args;
+
+static int cmd_cat(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&cat_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, cat_args.end, argv[0]);
+    return 1;
+  }
+
+  char full_path[512];
+  resolve_path(cat_args.path->sval[0], full_path, sizeof(full_path));
+
+  FILE *f = fopen(full_path, "r");
+  if (!f) {
+    perror("cat failed");
+    return 1;
+  }
+
+  char buf[512];
+  size_t read_bytes;
+  int lines_printed = 0;
+  const int PAGE_LINES = 20;
+
+  while ((read_bytes = fread(buf, 1, sizeof(buf) - 1, f)) > 0) {
+    buf[read_bytes] = '\0';
+    for (size_t i = 0; i < read_bytes; i++) {
+      putchar(buf[i]);
+      if (buf[i] == '\n') {
+        lines_printed++;
+        if (lines_printed >= PAGE_LINES) {
+          printf("\n-- More -- (Space/Enter: next, q: quit)");
+          fflush(stdout);
+          int c = getchar();
+          if (c == 'q' || c == 'Q') {
+            printf("\n");
+            fclose(f);
+            return 0;
+          }
+          lines_printed = 0;
+        }
+      }
+    }
+  }
+
+  fclose(f);
+  return 0;
+}
+
+/* --- rm command --- */
+static struct {
+  struct arg_str *path;
+  struct arg_end *end;
+} rm_args;
+
+static int cmd_rm(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&rm_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, rm_args.end, argv[0]);
+    return 1;
+  }
+  char full_path[512];
+  resolve_path(rm_args.path->sval[0], full_path, sizeof(full_path));
+  if (unlink(full_path) == 0) {
+    printf("Deleted: %s\n", full_path);
+  } else {
+    perror("rm failed");
+  }
+  return 0;
+}
+
+/* --- set_clock command --- */
+static struct {
+  struct arg_str *date;
+  struct arg_str *time;
+  struct arg_end *end;
+} set_clock_args;
+
+static int cmd_set_clock(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&set_clock_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, set_clock_args.end, argv[0]);
+    return 1;
+  }
+  int year, mon, day, hour, min, sec;
+  if (sscanf(set_clock_args.date->sval[0], "%d-%d-%d", &year, &mon, &day) !=
+          3 ||
+      sscanf(set_clock_args.time->sval[0], "%d:%d:%d", &hour, &min, &sec) !=
+          3) {
+    printf("Error: format must be YYYY-MM-DD HH:MM:SS\n");
+    return 1;
+  }
+  struct tm tm = {.tm_year = year - 1900,
+                  .tm_mon = mon - 1,
+                  .tm_mday = day,
+                  .tm_hour = hour,
+                  .tm_min = min,
+                  .tm_sec = sec};
+  time_t t = mktime(&tm);
+  struct timeval tv = {.tv_sec = t};
+  settimeofday(&tv, NULL);
+  printf("System clock updated manually.\n");
+  return 0;
+}
+/* --- tool_exec command --- */
+static struct {
+  struct arg_str *name;
+  struct arg_str *input;
+  struct arg_end *end;
+} tool_exec_args;
+
+static int cmd_tool_exec(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&tool_exec_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, tool_exec_args.end, argv[0]);
+    return 1;
+  }
+
+  char *output = malloc(8192);
+  if (!output) {
+    printf("Out of memory.\n");
+    return 1;
+  }
+
+  tool_registry_execute(tool_exec_args.name->sval[0],
+                        tool_exec_args.input->sval[0], output, 8192);
+  printf("Tool output:\n%s\n", output);
+
+  free(output);
   return 0;
 }
 
@@ -465,6 +741,18 @@ esp_err_t serial_cli_init(void) {
       .argtable = &base_url_args,
   };
   esp_console_cmd_register(&base_url_cmd);
+
+  /* set_timezone */
+  timezone_args.tz =
+      arg_str1(NULL, NULL, "<tz>", "POSIX TZ string (e.g. KST-9)");
+  timezone_args.end = arg_end(1);
+  esp_console_cmd_t timezone_cmd = {
+      .command = "set_timezone",
+      .help = "Set system timezone",
+      .func = &cmd_set_timezone,
+      .argtable = &timezone_args,
+  };
+  esp_console_cmd_register(&timezone_cmd);
 
   /* memory_read */
   esp_console_cmd_t mem_read_cmd = {
@@ -561,6 +849,50 @@ esp_err_t serial_cli_init(void) {
   };
   esp_console_cmd_register(&config_reset_cmd);
 
+  /* tg_auth_add */
+  tg_auth_add_args.chat_id =
+      arg_str1(NULL, NULL, "<chat_id>", "Telegram Chat ID");
+  tg_auth_add_args.end = arg_end(1);
+  esp_console_cmd_t tg_auth_add_cmd = {
+      .command = "tg_auth_add",
+      .help = "Authorize a Telegram Chat ID",
+      .func = &cmd_tg_auth_add,
+      .argtable = &tg_auth_add_args,
+  };
+  esp_console_cmd_register(&tg_auth_add_cmd);
+
+  /* tg_auth_remove */
+  tg_auth_remove_args.chat_id =
+      arg_str1(NULL, NULL, "<chat_id>", "Telegram Chat ID");
+  tg_auth_remove_args.end = arg_end(1);
+  esp_console_cmd_t tg_auth_remove_cmd = {
+      .command = "tg_auth_remove",
+      .help = "Deauthorize a Telegram Chat ID",
+      .func = &cmd_tg_auth_remove,
+      .argtable = &tg_auth_remove_args,
+  };
+  esp_console_cmd_register(&tg_auth_remove_cmd);
+
+  /* tg_auth_list */
+  esp_console_cmd_t tg_auth_list_cmd = {
+      .command = "tg_auth_list",
+      .help = "List authorized Telegram chats",
+      .func = &cmd_tg_auth_list,
+  };
+  esp_console_cmd_register(&tg_auth_list_cmd);
+
+  /* tool_exec */
+  tool_exec_args.name = arg_str1(NULL, NULL, "<name>", "Tool name");
+  tool_exec_args.input = arg_str1(NULL, NULL, "<input>", "JSON input");
+  tool_exec_args.end = arg_end(2);
+  esp_console_cmd_t tool_exec_cmd = {
+      .command = "tool_exec",
+      .help = "Execute a tool manually",
+      .func = &cmd_tool_exec,
+      .argtable = &tool_exec_args,
+  };
+  esp_console_cmd_register(&tool_exec_cmd);
+
   /* restart */
   esp_console_cmd_t restart_cmd = {
       .command = "restart",
@@ -572,6 +904,59 @@ esp_err_t serial_cli_init(void) {
   /* Start REPL */
   ESP_ERROR_CHECK(esp_console_start_repl(repl));
   ESP_LOGI(TAG, "Serial CLI started");
+
+  /* clear_history */
+  esp_console_cmd_t clear_hist_cmd = {
+      .command = "clear_history",
+      .help = "Delete all session history files",
+      .func = &cmd_clear_history,
+  };
+  esp_console_cmd_register(&clear_hist_cmd);
+
+  /* set_clock */
+  set_clock_args.date = arg_str1(NULL, NULL, "<YYYY-MM-DD>", "Date");
+  set_clock_args.time = arg_str1(NULL, NULL, "<HH:MM:SS>", "Time");
+  set_clock_args.end = arg_end(2);
+  esp_console_cmd_t set_clock_cmd = {
+      .command = "set_clock",
+      .help = "Set system clock manually",
+      .func = &cmd_set_clock,
+      .argtable = &set_clock_args,
+  };
+  esp_console_cmd_register(&set_clock_cmd);
+
+  /* rm */
+  rm_args.path = arg_str1(NULL, NULL, "<path>", "File path to delete");
+  rm_args.end = arg_end(1);
+  esp_console_cmd_t rm_cmd = {
+      .command = "rm",
+      .help = "Delete a file from SPIFFS",
+      .func = &cmd_rm,
+      .argtable = &rm_args,
+  };
+  esp_console_cmd_register(&rm_cmd);
+
+  /* ls */
+  ls_args.path = arg_str0(NULL, NULL, "[path]", "Directory path to list");
+  ls_args.end = arg_end(1);
+  esp_console_cmd_t ls_cmd = {
+      .command = "ls",
+      .help = "List files in SPIFFS",
+      .func = &cmd_ls,
+      .argtable = &ls_args,
+  };
+  esp_console_cmd_register(&ls_cmd);
+
+  /* cat */
+  cat_args.path = arg_str1(NULL, NULL, "<path>", "File path to read");
+  cat_args.end = arg_end(1);
+  esp_console_cmd_t cat_cmd = {
+      .command = "cat",
+      .help = "Read a file from SPIFFS with paging",
+      .func = &cmd_cat,
+      .argtable = &cat_args,
+  };
+  esp_console_cmd_register(&cat_cmd);
 
   return ESP_OK;
 }
