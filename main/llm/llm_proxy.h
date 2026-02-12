@@ -34,6 +34,14 @@ esp_err_t llm_set_base_url(const char *url);
 esp_err_t llm_set_timezone(const char *tz);
 
 /**
+ * Profile Management
+ */
+esp_err_t llm_profile_use(const char *name);
+esp_err_t llm_profile_del(const char *name);
+void llm_profile_list(void);
+const char *llm_get_active_profile(void);
+
+/**
  * Send a chat completion request to Anthropic Messages API (streaming).
  *
  * @param system_prompt  System prompt string
@@ -49,9 +57,10 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
 /* ── Tool Use Support ──────────────────────────────────────────── */
 
 typedef struct {
-  char id[64];   /* "toolu_xxx" */
-  char name[32]; /* "web_search" */
-  char *input;   /* heap-allocated JSON string */
+  char id[64];             /* "toolu_xxx" */
+  char name[32];           /* "web_search" */
+  char *input;             /* heap-allocated JSON string */
+  char *thought_signature; /* for Gemini compatibility */
   size_t input_len;
 } llm_tool_call_t;
 

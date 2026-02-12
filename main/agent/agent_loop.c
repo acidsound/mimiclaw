@@ -45,6 +45,10 @@ static cJSON *build_assistant_content(const llm_response_t *resp) {
       cJSON_AddItemToObject(tool_block, "input", cJSON_CreateObject());
     }
 
+    if (call->thought_signature) {
+      cJSON_AddStringToObject(tool_block, "thought_signature",
+                              call->thought_signature);
+    }
     cJSON_AddItemToArray(content, tool_block);
   }
 

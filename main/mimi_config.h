@@ -128,6 +128,8 @@
 #define MIMI_NVS_KEY_PROVIDER "provider"
 #define MIMI_NVS_KEY_BASE_URL "base_url"
 #define MIMI_NVS_KEY_TIMEZONE "timezone"
+#define MIMI_NVS_KEY_ACTIVE_PF "active_pf"
+#define MIMI_NVS_KEY_PF_LIST "pf_list"
 
 /* Custom Error Codes */
 #define ESP_ERR_ADMISSION_CONTROL 0x10B

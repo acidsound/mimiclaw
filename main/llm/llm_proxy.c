@@ -8,6 +8,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "nvs.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,6 +18,12 @@ static char s_api_key[128] = {0};
 static char s_model[64] = MIMI_LLM_DEFAULT_MODEL;
 static int s_provider = MIMI_LLM_DEFAULT_PROVIDER;
 static char s_base_url[128] = {0};
+static char s_active_pf[16] = "default";
+
+/* Helper: get NVS namespace for current profile */
+static void get_pf_ns(char *buf, size_t size) {
+  snprintf(buf, size, "pf_%.12s", s_active_pf);
+}
 
 /* ── Response buffer ──────────────────────────────────────────── */
 
@@ -80,7 +87,15 @@ static void trim_inplace(char *s) {
 /* ── Init ─────────────────────────────────────────────────────── */
 
 esp_err_t llm_proxy_init(void) {
-  /* Start with build-time defaults */
+  /* 1. Determine active profile */
+  nvs_handle_t nvs;
+  if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs) == ESP_OK) {
+    size_t len = sizeof(s_active_pf);
+    nvs_get_str(nvs, MIMI_NVS_KEY_ACTIVE_PF, s_active_pf, &len);
+    nvs_close(nvs);
+  }
+
+  /* 2. Start with build-time defaults */
   if (MIMI_SECRET_API_KEY[0] != '\0') {
     strncpy(s_api_key, MIMI_SECRET_API_KEY, sizeof(s_api_key) - 1);
   }
@@ -101,9 +116,10 @@ esp_err_t llm_proxy_init(void) {
     }
   }
 
-  /* NVS overrides take highest priority (set via CLI) */
-  nvs_handle_t nvs;
-  if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs) == ESP_OK) {
+  /* 3. Load from active profile (takes highest priority) */
+  char ns[16];
+  get_pf_ns(ns, sizeof(ns));
+  if (nvs_open(ns, NVS_READONLY, &nvs) == ESP_OK) {
     char tmp[128] = {0};
     size_t len = sizeof(tmp);
     if (nvs_get_str(nvs, MIMI_NVS_KEY_API_KEY, tmp, &len) == ESP_OK && tmp[0]) {
@@ -126,7 +142,40 @@ esp_err_t llm_proxy_init(void) {
         tmp[0]) {
       strncpy(s_base_url, tmp, sizeof(s_base_url) - 1);
     }
+    nvs_close(nvs);
+  }
 
+  /* 4. Fallback to global NVS (original locations) for backward compatibility
+   */
+  if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs) == ESP_OK) {
+    char tmp[128] = {0};
+    size_t len = sizeof(tmp);
+    /* Load key only if still empty */
+    if (s_api_key[0] == '\0' &&
+        nvs_get_str(nvs, MIMI_NVS_KEY_API_KEY, tmp, &len) == ESP_OK && tmp[0]) {
+      strncpy(s_api_key, tmp, sizeof(s_api_key) - 1);
+    }
+    len = sizeof(tmp);
+    if (strcmp(s_model, MIMI_LLM_DEFAULT_MODEL) == 0) {
+      if (nvs_get_str(nvs, MIMI_NVS_KEY_MODEL, tmp, &len) == ESP_OK && tmp[0]) {
+        strncpy(s_model, tmp, sizeof(s_model) - 1);
+      }
+    }
+    int32_t val;
+    if (nvs_get_i32(nvs, MIMI_NVS_KEY_PROVIDER, &val) == ESP_OK) {
+      /* If s_provider is still default, override it */
+      if (s_provider == MIMI_LLM_DEFAULT_PROVIDER)
+        s_provider = (int)val;
+    }
+    len = sizeof(tmp);
+    if (nvs_get_str(nvs, MIMI_NVS_KEY_BASE_URL, tmp, &len) == ESP_OK &&
+        tmp[0]) {
+      if (s_base_url[0] == '\0' ||
+          strcmp(s_base_url, MIMI_LLM_API_URL_ANTHROPIC) == 0 ||
+          strcmp(s_base_url, MIMI_LLM_API_URL_OPENAI) == 0) {
+        strncpy(s_base_url, tmp, sizeof(s_base_url) - 1);
+      }
+    }
     nvs_close(nvs);
   }
 
@@ -136,8 +185,8 @@ esp_err_t llm_proxy_init(void) {
   trim_inplace(s_model);
 
   if (s_api_key[0]) {
-    ESP_LOGI(TAG, "LLM initialized: provider=%d, model=%s", s_provider,
-             s_model);
+    ESP_LOGI(TAG, "LLM initialized: profile=%s, provider=%d, model=%s",
+             s_active_pf, s_provider, s_model);
     ESP_LOGI(TAG, "Base URL: %s", s_base_url);
 
     /* Timezone info check from NVS */
@@ -530,13 +579,15 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
     if (!role || !cJSON_IsString(role))
       continue;
 
-    cJSON *oa_msg = cJSON_CreateObject();
-    cJSON_AddStringToObject(oa_msg, "role", role->valuestring);
-
     if (cJSON_IsString(content)) {
+      cJSON *oa_msg = cJSON_CreateObject();
+      cJSON_AddStringToObject(oa_msg, "role", role->valuestring);
       cJSON_AddStringToObject(oa_msg, "content", content->valuestring);
+      cJSON_AddItemToArray(oa_msgs, oa_msg);
     } else if (cJSON_IsArray(content)) {
       /* Anthropic content array block */
+      cJSON *oa_msg = NULL; // This will hold the current OpenAI message being
+                            // built for text/tool_use
       cJSON *block;
       cJSON_ArrayForEach(block, content) {
         cJSON *type = cJSON_GetObjectItem(block, "type");
@@ -544,11 +595,23 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
           continue;
 
         if (strcmp(type->valuestring, "text") == 0) {
+          if (!oa_msg) { // Create a new message if not already started for this
+                         // Anthropic message
+            oa_msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(oa_msg, "role", role->valuestring);
+            cJSON_AddItemToArray(oa_msgs, oa_msg);
+          }
           cJSON *text = cJSON_GetObjectItem(block, "text");
           if (text && cJSON_IsString(text)) {
             cJSON_AddStringToObject(oa_msg, "content", text->valuestring);
           }
         } else if (strcmp(type->valuestring, "tool_use") == 0) {
+          if (!oa_msg) { // Create a new message if not already started for this
+                         // Anthropic message
+            oa_msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(oa_msg, "role", role->valuestring);
+            cJSON_AddItemToArray(oa_msgs, oa_msg);
+          }
           /* Convert tool_use to tool_calls array */
           cJSON *tcalls = cJSON_GetObjectItem(oa_msg, "tool_calls");
           if (!tcalls) {
@@ -560,7 +623,7 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
           cJSON *id = cJSON_GetObjectItem(block, "id");
           if (id)
             cJSON_AddStringToObject(tcall, "id", id->valuestring);
-
+          cJSON *tsig = cJSON_GetObjectItem(block, "thought_signature");
           cJSON *func = cJSON_CreateObject();
           cJSON *name = cJSON_GetObjectItem(block, "name");
           if (name)
@@ -571,30 +634,61 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
             cJSON_AddStringToObject(func, "arguments", args);
             free(args);
           }
+
+          if (tsig && cJSON_IsString(tsig)) {
+            bool is_gemini = (strstr(s_model, "gemini") != NULL);
+            if (!is_gemini) {
+              /* Simple case-insensitive check if strstr fails */
+              char lower_model[64];
+              strncpy(lower_model, s_model, sizeof(lower_model) - 1);
+              lower_model[sizeof(lower_model) - 1] = '\0';
+              for (int i = 0; lower_model[i]; i++)
+                lower_model[i] = tolower((int)lower_model[i]);
+              if (strstr(lower_model, "gemini"))
+                is_gemini = true;
+            }
+
+            if (is_gemini) {
+              /* 1. Standard OpenAI-like placement */
+              cJSON_AddStringToObject(tcall, "thought_signature",
+                                      tsig->valuestring);
+
+              /* 2. Strict Gemini Google-Shim placement:
+               * extra_content.google.thought_signature */
+              cJSON *extra = cJSON_CreateObject();
+              cJSON *google = cJSON_CreateObject();
+              cJSON_AddStringToObject(google, "thought_signature",
+                                      tsig->valuestring);
+              cJSON_AddItemToObject(extra, "google", google);
+              cJSON_AddItemToObject(tcall, "extra_content", extra);
+
+              /* 3. Backward compat placement */
+              cJSON_AddStringToObject(func, "thought_signature",
+                                      tsig->valuestring);
+            }
+          }
           cJSON_AddItemToObject(tcall, "function", func);
           cJSON_AddItemToArray(tcalls, tcall);
         } else if (strcmp(type->valuestring, "tool_result") == 0) {
-          /* Convert tool_result to role: tool */
-          cJSON_ReplaceItemInObject(oa_msg, "role", cJSON_CreateString("tool"));
+          /* Convert tool_result to a separate role: tool message */
+          cJSON *t_msg = cJSON_CreateObject();
+          cJSON_AddStringToObject(t_msg, "role", "tool");
           cJSON *id = cJSON_GetObjectItem(block, "tool_use_id");
           if (id)
-            cJSON_AddStringToObject(oa_msg, "tool_call_id", id->valuestring);
+            cJSON_AddStringToObject(t_msg, "tool_call_id", id->valuestring);
           cJSON *res_content = cJSON_GetObjectItem(block, "content");
           if (res_content)
-            cJSON_AddStringToObject(oa_msg, "content",
-                                    res_content->valuestring);
+            cJSON_AddStringToObject(t_msg, "content", res_content->valuestring);
+          cJSON_AddItemToArray(oa_msgs, t_msg);
         }
       }
+      /* Strict providers (like Arcee via OpenRouter) require "content" field
+       * even if null when tool_calls is present. */
+      if (oa_msg && strcmp(role->valuestring, "assistant") == 0 &&
+          !cJSON_GetObjectItem(oa_msg, "content")) {
+        cJSON_AddNullToObject(oa_msg, "content");
+      }
     }
-
-    /* Strict providers (like Arcee via OpenRouter) require "content" field
-     * even if null when tool_calls is present. */
-    if (strcmp(role->valuestring, "assistant") == 0 &&
-        !cJSON_GetObjectItem(oa_msg, "content")) {
-      cJSON_AddNullToObject(oa_msg, "content");
-    }
-
-    cJSON_AddItemToArray(oa_msgs, oa_msg);
   }
   return oa_msgs;
 }
@@ -760,8 +854,12 @@ void llm_response_free(llm_response_t *resp) {
   resp->text = NULL;
   resp->text_len = 0;
   for (int i = 0; i < resp->call_count; i++) {
-    free(resp->calls[i].input);
+    if (resp->calls[i].input)
+      free(resp->calls[i].input);
     resp->calls[i].input = NULL;
+    if (resp->calls[i].thought_signature)
+      free(resp->calls[i].thought_signature);
+    resp->calls[i].thought_signature = NULL;
   }
   resp->call_count = 0;
   resp->tool_use = false;
@@ -850,13 +948,12 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
     return err;
   }
 
-  /* Raw response logging */
-  /* Log cleaned up in unified block later */
-
-  if (status != 200) {
-    ESP_LOGE(TAG, "API error %d: %.500s", status, rb.data ? rb.data : "");
-    resp_buf_free(&rb);
-    return ESP_FAIL;
+  /* Raw response logging (Do BEFORE free) */
+  if (rb.data) {
+    const char *raw_ptr = rb.data;
+    while (*raw_ptr && (unsigned char)*raw_ptr <= 32)
+      raw_ptr++;
+    ESP_LOGI(TAG, "[LLM_RAW] %.*s", 500, raw_ptr);
   }
 
   /* Parse full JSON response */
@@ -985,6 +1082,25 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
                   call->input_len = strlen(call->input);
                 }
               }
+              /* Search for thought_signature in multiple locations */
+              cJSON *tsig = cJSON_GetObjectItem(tc, "thought_signature");
+              if (!tsig) {
+                /* Deep search in extra_content.google.thought_signature */
+                cJSON *extra = cJSON_GetObjectItem(tc, "extra_content");
+                if (extra) {
+                  cJSON *google = cJSON_GetObjectItem(extra, "google");
+                  if (google) {
+                    tsig = cJSON_GetObjectItem(google, "thought_signature");
+                  }
+                }
+              }
+              if (!tsig) {
+                tsig = cJSON_GetObjectItem(func, "thought_signature");
+              }
+
+              if (tsig && cJSON_IsString(tsig)) {
+                call->thought_signature = strdup(tsig->valuestring);
+              }
               resp->call_count++;
             }
           }
@@ -1008,14 +1124,7 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
     resp->text_len = strlen(resp->text);
   }
 
-  /* Always log first 500 chars of raw response while debugging */
-  const char *raw_ptr = rb.data ? rb.data : "NULL";
-  if (rb.data) {
-    while (*raw_ptr && (unsigned char)*raw_ptr <= 32) {
-      raw_ptr++;
-    }
-  }
-  ESP_LOGI(TAG, "[LLM_RAW] %.*s", 500, raw_ptr);
+  /* Redundant log removed */
 
   if (resp->call_count == 0) {
     parse_tag_based_tool_calls(resp);
@@ -1037,36 +1146,45 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
 /* ── NVS helpers ──────────────────────────────────────────────── */
 
 esp_err_t llm_set_api_key(const char *api_key) {
+  char ns[16];
+  get_pf_ns(ns, sizeof(ns));
   nvs_handle_t nvs;
-  ESP_ERROR_CHECK(nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs));
-  ESP_ERROR_CHECK(nvs_set_str(nvs, MIMI_NVS_KEY_API_KEY, api_key));
-  ESP_ERROR_CHECK(nvs_commit(nvs));
+  if (nvs_open(ns, NVS_READWRITE, &nvs) != ESP_OK)
+    return ESP_FAIL;
+  nvs_set_str(nvs, MIMI_NVS_KEY_API_KEY, api_key);
+  nvs_commit(nvs);
   nvs_close(nvs);
 
   strncpy(s_api_key, api_key, sizeof(s_api_key) - 1);
   trim_inplace(s_api_key);
-  ESP_LOGI(TAG, "API key saved");
+  ESP_LOGI(TAG, "API key saved to profile: %s", s_active_pf);
   return ESP_OK;
 }
 
 esp_err_t llm_set_model(const char *model) {
+  char ns[16];
+  get_pf_ns(ns, sizeof(ns));
   nvs_handle_t nvs;
-  ESP_ERROR_CHECK(nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs));
-  ESP_ERROR_CHECK(nvs_set_str(nvs, MIMI_NVS_KEY_MODEL, model));
-  ESP_ERROR_CHECK(nvs_commit(nvs));
+  if (nvs_open(ns, NVS_READWRITE, &nvs) != ESP_OK)
+    return ESP_FAIL;
+  nvs_set_str(nvs, MIMI_NVS_KEY_MODEL, model);
+  nvs_commit(nvs);
   nvs_close(nvs);
 
   strncpy(s_model, model, sizeof(s_model) - 1);
   trim_inplace(s_model);
-  ESP_LOGI(TAG, "Model set to: %s", s_model);
+  ESP_LOGI(TAG, "Model saved to profile: %s (%s)", s_active_pf, s_model);
   return ESP_OK;
 }
 
 esp_err_t llm_set_provider(int provider) {
+  char ns[16];
+  get_pf_ns(ns, sizeof(ns));
   nvs_handle_t nvs;
-  ESP_ERROR_CHECK(nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs));
-  ESP_ERROR_CHECK(nvs_set_i32(nvs, MIMI_NVS_KEY_PROVIDER, provider));
-  ESP_ERROR_CHECK(nvs_commit(nvs));
+  if (nvs_open(ns, NVS_READWRITE, &nvs) != ESP_OK)
+    return ESP_FAIL;
+  nvs_set_i32(nvs, MIMI_NVS_KEY_PROVIDER, provider);
+  nvs_commit(nvs);
   nvs_close(nvs);
 
   s_provider = provider;
@@ -1080,22 +1198,127 @@ esp_err_t llm_set_provider(int provider) {
     }
   }
 
-  ESP_LOGI(TAG, "Provider set to: %d", s_provider);
+  ESP_LOGI(TAG, "Provider saved to profile: %s (%d)", s_active_pf, s_provider);
   return ESP_OK;
 }
 
 esp_err_t llm_set_base_url(const char *url) {
+  char ns[16];
+  get_pf_ns(ns, sizeof(ns));
   nvs_handle_t nvs;
-  ESP_ERROR_CHECK(nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs));
-  ESP_ERROR_CHECK(nvs_set_str(nvs, MIMI_NVS_KEY_BASE_URL, url));
-  ESP_ERROR_CHECK(nvs_commit(nvs));
+  if (nvs_open(ns, NVS_READWRITE, &nvs) != ESP_OK)
+    return ESP_FAIL;
+  nvs_set_str(nvs, MIMI_NVS_KEY_BASE_URL, url);
+  nvs_commit(nvs);
   nvs_close(nvs);
 
   strncpy(s_base_url, url, sizeof(s_base_url) - 1);
   trim_inplace(s_base_url);
-  ESP_LOGI(TAG, "Base URL set to: %s", s_base_url);
+  ESP_LOGI(TAG, "Base URL saved to profile: %s", s_active_pf);
   return ESP_OK;
 }
+
+esp_err_t llm_profile_use(const char *name) {
+  if (!name || strlen(name) == 0 || strlen(name) > 12)
+    return ESP_ERR_INVALID_ARG;
+
+  /* Validate name: alphanumeric only */
+  for (int i = 0; name[i]; i++) {
+    if (!isalnum((int)name[i]) && name[i] != '_' && name[i] != '-')
+      return ESP_ERR_INVALID_ARG;
+  }
+
+  /* 1. Save active profile name to global llm config */
+  nvs_handle_t nvs;
+  if (nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs) == ESP_OK) {
+    nvs_set_str(nvs, MIMI_NVS_KEY_ACTIVE_PF, name);
+
+    /* 2. Update profile index list */
+    char list[256] = {0};
+    size_t len = sizeof(list);
+    nvs_get_str(nvs, MIMI_NVS_KEY_PF_LIST, list, &len);
+
+    if (strstr(list, name) == NULL) {
+      if (strlen(list) > 0)
+        strcat(list, ",");
+      strcat(list, name);
+      nvs_set_str(nvs, MIMI_NVS_KEY_PF_LIST, list);
+    }
+
+    nvs_commit(nvs);
+    nvs_close(nvs);
+  }
+
+  /* 3. Update local state and reload */
+  strncpy(s_active_pf, name, sizeof(s_active_pf) - 1);
+  ESP_LOGI(TAG, "Switched to profile: %s. Reloading settings...", s_active_pf);
+  return llm_proxy_init();
+}
+
+esp_err_t llm_profile_del(const char *name) {
+  if (!name || strcmp(name, "default") == 0)
+    return ESP_ERR_INVALID_ARG;
+
+  /* 1. Remove from index list */
+  nvs_handle_t nvs_host;
+  if (nvs_open(MIMI_NVS_LLM, NVS_READWRITE, &nvs_host) == ESP_OK) {
+    char list[256] = {0};
+    size_t len = sizeof(list);
+    if (nvs_get_str(nvs_host, MIMI_NVS_KEY_PF_LIST, list, &len) == ESP_OK) {
+      char new_list[256] = {0};
+      char *token = strtok(list, ",");
+      while (token) {
+        if (strcmp(token, name) != 0) {
+          if (strlen(new_list) > 0)
+            strcat(new_list, ",");
+          strcat(new_list, token);
+        }
+        token = strtok(NULL, ",");
+      }
+      nvs_set_str(nvs_host, MIMI_NVS_KEY_PF_LIST, new_list);
+      nvs_commit(nvs_host);
+    }
+    nvs_close(nvs_host);
+  }
+
+  /* 2. Erase the profile namespace */
+  char ns[16];
+  snprintf(ns, sizeof(ns), "pf_%.12s", name);
+
+  nvs_handle_t nvs;
+  if (nvs_open(ns, NVS_READWRITE, &nvs) == ESP_OK) {
+    nvs_erase_all(nvs);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+    ESP_LOGI(TAG, "Profile data erased: %s", name);
+    return ESP_OK;
+  }
+  return ESP_ERR_NOT_FOUND;
+}
+
+void llm_profile_list(void) {
+  nvs_handle_t nvs;
+  char list[256] = "default";
+  if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs) == ESP_OK) {
+    size_t len = sizeof(list);
+    nvs_get_str(nvs, MIMI_NVS_KEY_PF_LIST, list, &len);
+    nvs_close(nvs);
+  }
+
+  printf("Saved Profiles:\n");
+  char *token = strtok(list, ",");
+  while (token) {
+    bool active = (strcmp(token, s_active_pf) == 0);
+    if (active) {
+      printf("  -> %-12s [ACTIVE]\n", token);
+    } else {
+      printf("     %-12s\n", token);
+    }
+    token = strtok(NULL, ",");
+  }
+}
+
+const char *llm_get_active_profile(void) { return s_active_pf; }
 
 esp_err_t llm_set_timezone(const char *tz) {
   nvs_handle_t nvs;

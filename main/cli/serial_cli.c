@@ -227,19 +227,37 @@ static void print_config(const char *label, const char *ns, const char *key,
   char nvs_val[128] = {0};
   const char *source = "not set";
   const char *display = "(empty)";
-
-  /* NVS takes highest priority */
   nvs_handle_t nvs;
-  if (nvs_open(ns, NVS_READONLY, &nvs) == ESP_OK) {
-    size_t len = sizeof(nvs_val);
-    if (nvs_get_str(nvs, key, nvs_val, &len) == ESP_OK && nvs_val[0]) {
-      source = "NVS";
-      display = nvs_val;
+
+  /* 1. Try Active Profile first if it's an LLM-related namespace */
+  bool is_llm =
+      (strcmp(ns, MIMI_NVS_LLM) == 0 || strcmp(ns, MIMI_NVS_PROXY) == 0);
+  if (is_llm) {
+    char pf_ns[16];
+    snprintf(pf_ns, sizeof(pf_ns), "pf_%.12s", llm_get_active_profile());
+    if (nvs_open(pf_ns, NVS_READONLY, &nvs) == ESP_OK) {
+      size_t len = sizeof(nvs_val);
+      if (nvs_get_str(nvs, key, nvs_val, &len) == ESP_OK && nvs_val[0]) {
+        source = "PF"; // Profile
+        display = nvs_val;
+      }
+      nvs_close(nvs);
     }
-    nvs_close(nvs);
   }
 
-  /* Fall back to build-time value */
+  /* 2. Try Global NVS (backward compat) if not found in PF */
+  if (strcmp(source, "not set") == 0) {
+    if (nvs_open(ns, NVS_READONLY, &nvs) == ESP_OK) {
+      size_t len = sizeof(nvs_val);
+      if (nvs_get_str(nvs, key, nvs_val, &len) == ESP_OK && nvs_val[0]) {
+        source = "NVS";
+        display = nvs_val;
+      }
+      nvs_close(nvs);
+    }
+  }
+
+  /* 3. Fall back to build-time value */
   if (strcmp(source, "not set") == 0 && build_val[0] != '\0') {
     source = "build";
     display = build_val;
@@ -261,26 +279,9 @@ static int cmd_config_show(int argc, char **argv) {
   print_config("TG Token", MIMI_NVS_TG, MIMI_NVS_KEY_TG_TOKEN,
                MIMI_SECRET_TG_TOKEN, true);
 
-  /* API Key with length check */
-  {
-    char key_buf[128] = {0};
-    size_t key_len = sizeof(key_buf);
-    nvs_handle_t nvs_h;
-    if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs_h) == ESP_OK) {
-      if (nvs_get_str(nvs_h, MIMI_NVS_KEY_API_KEY, key_buf, &key_len) ==
-          ESP_OK) {
-        printf("  %-14s: %.4s**** (len=%d) [NVS]\n", "API Key", key_buf,
-               (int)strlen(key_buf));
-      } else {
-        print_config("API Key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY,
-                     MIMI_SECRET_API_KEY, true);
-      }
-      nvs_close(nvs_h);
-    } else {
-      print_config("API Key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY,
-                   MIMI_SECRET_API_KEY, true);
-    }
-  }
+  printf("--- LLM Profile: %s ---\n", llm_get_active_profile());
+  print_config("API Key", MIMI_NVS_LLM, MIMI_NVS_KEY_API_KEY,
+               MIMI_SECRET_API_KEY, true);
 
   print_config("Model", MIMI_NVS_LLM, MIMI_NVS_KEY_MODEL, MIMI_SECRET_MODEL,
                false);
@@ -397,18 +398,20 @@ static int cmd_set_provider(int argc, char **argv) {
   }
   const char *val = provider_args.provider->sval[0];
   int p = -1;
-  if (strcasecmp(val, "anthropic") == 0)
+  if (strcasecmp(val, "anthropic") == 0 || strcasecmp(val, "ant") == 0)
     p = MIMI_LLM_PROVIDER_ANTHROPIC;
-  else if (strcasecmp(val, "openai") == 0)
+  else if (strcasecmp(val, "openai") == 0 || strcasecmp(val, "oa") == 0)
     p = MIMI_LLM_PROVIDER_OPENAI;
-  else if (strcasecmp(val, "kimi") == 0)
+  else if (strcasecmp(val, "kimi") == 0 || strcasecmp(val, "gemini") == 0 ||
+           strcasecmp(val, "deepseek") == 0 || strcasecmp(val, "ds") == 0)
     p = MIMI_LLM_PROVIDER_OPENAI;
 
   if (p >= 0) {
     llm_set_provider(p);
-    printf("Provider set to %s (%d).\n", val, p);
+    printf("Provider for '%s' set to %s (%d).\n", llm_get_active_profile(), val,
+           p);
   } else {
-    printf("Invalid provider. Use 'anthropic' or 'openai'.\n");
+    printf("Invalid provider. Use 'ant' or 'oa' or aliases (gemini, ds).\n");
   }
   return 0;
 }
@@ -445,6 +448,52 @@ static int cmd_set_timezone(int argc, char **argv) {
   llm_set_timezone(timezone_args.tz->sval[0]);
   printf("Timezone set to %s. Restart to apply to SNTP.\n",
          timezone_args.tz->sval[0]);
+  return 0;
+}
+
+/* --- pf_use command --- */
+static struct {
+  struct arg_str *name;
+  struct arg_end *end;
+} pf_use_args;
+
+static int cmd_pf_use(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&pf_use_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, pf_use_args.end, argv[0]);
+    return 1;
+  }
+  if (llm_profile_use(pf_use_args.name->sval[0]) == ESP_OK) {
+    printf("Switched to profile: %s\n", pf_use_args.name->sval[0]);
+  } else {
+    printf("Error: Profile name too long or invalid.\n");
+  }
+  return 0;
+}
+
+/* --- pf_ls command --- */
+static int cmd_pf_ls(int argc, char **argv) {
+  llm_profile_list();
+  return 0;
+}
+
+/* --- pf_del command --- */
+static struct {
+  struct arg_str *name;
+  struct arg_end *end;
+} pf_del_args;
+
+static int cmd_pf_del(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&pf_del_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, pf_del_args.end, argv[0]);
+    return 1;
+  }
+  if (llm_profile_del(pf_del_args.name->sval[0]) == ESP_OK) {
+    printf("Profile deleted: %s\n", pf_del_args.name->sval[0]);
+  } else {
+    printf("Error: Profile not found or protected.\n");
+  }
   return 0;
 }
 
@@ -741,6 +790,36 @@ esp_err_t serial_cli_init(void) {
       .argtable = &base_url_args,
   };
   esp_console_cmd_register(&base_url_cmd);
+
+  /* pf_use */
+  pf_use_args.name = arg_str1(NULL, NULL, "<name>", "Profile name (short)");
+  pf_use_args.end = arg_end(1);
+  esp_console_cmd_t pf_use_cmd = {
+      .command = "pf_use",
+      .help = "Switch to LLM profile",
+      .func = &cmd_pf_use,
+      .argtable = &pf_use_args,
+  };
+  esp_console_cmd_register(&pf_use_cmd);
+
+  /* pf_ls */
+  esp_console_cmd_t pf_ls_cmd = {
+      .command = "pf_ls",
+      .help = "List LLM profiles",
+      .func = &cmd_pf_ls,
+  };
+  esp_console_cmd_register(&pf_ls_cmd);
+
+  /* pf_del */
+  pf_del_args.name = arg_str1(NULL, NULL, "<name>", "Profile to delete");
+  pf_del_args.end = arg_end(1);
+  esp_console_cmd_t pf_del_cmd = {
+      .command = "pf_del",
+      .help = "Delete LLM profile",
+      .func = &cmd_pf_del,
+      .argtable = &pf_del_args,
+  };
+  esp_console_cmd_register(&pf_del_cmd);
 
   /* set_timezone */
   timezone_args.tz =

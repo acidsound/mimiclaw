@@ -52,9 +52,12 @@ esp_err_t context_build_system_prompt(char *buf, size_t size) {
       "- read_file / write_file / edit_file: Manage SPIFFS files.\n"
       "- list_dir: Explore storage.\n\n"
       "## Memory (/spiffs/memory/)\n"
-      "- MEMORY.md: Store durable user facts (name, preferences).\n"
-      "- daily/<YYYY-MM-DD>.md: Today's log.\n"
-      "Proactively read/write memory to stay helpful across sessions.\n");
+      "- Internal storage for your persistent state.\n"
+      "- Proactively read/write files here to remember user facts.\n"
+      "## CRITICAL: STORAGE EXPLORATION\n"
+      "You MUST NOT hallucinate the contents of /spiffs/. If the user asks "
+      "for files, directory structure, or what's on the disk, you MUST "
+      "call `list_dir` first. Do NOT guess folder names or file lists.\n");
 
   /* Bootstrap files */
   off = append_file(buf, size, off, MIMI_SOUL_FILE, "Personality");
