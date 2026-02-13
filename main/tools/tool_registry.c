@@ -8,6 +8,8 @@
 
 #include "cJSON.h"
 #include "esp_log.h"
+#include <ctype.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "tools/tool_discovery.h"
@@ -15,10 +17,11 @@
 
 extern esp_err_t tool_wol_scan_start_execute(const char *, char *, size_t);
 extern esp_err_t tool_wol_scan_result_execute(const char *, char *, size_t);
+extern esp_err_t tool_wol_register_execute(const char *, char *, size_t);
 
 static const char *TAG = "tools";
 
-#define MAX_TOOLS 16
+#define MAX_TOOLS 17
 
 static mimi_tool_t s_tools[MAX_TOOLS];
 static int s_tool_count = 0;
@@ -31,6 +34,42 @@ static void register_tool(const mimi_tool_t *tool) {
   }
   s_tools[s_tool_count++] = *tool;
   ESP_LOGI(TAG, "Registered tool: %s", tool->name);
+}
+
+static void normalize_tool_name_for_registry(const char *input_name, char *out_name,
+                                           size_t out_name_size) {
+  if (!input_name || !out_name || out_name_size == 0) {
+    return;
+  }
+
+  size_t j = 0;
+  bool last_sep = false;
+  for (size_t i = 0; input_name[i] != '\0' && j + 1 < out_name_size; i++) {
+    unsigned char c = (unsigned char)input_name[i];
+    if (isalnum(c)) {
+      out_name[j++] = (char)tolower(c);
+      last_sep = false;
+    } else if (c == '_' || c == '-' || c == ' ' || c == '\t' || c == '\n') {
+      if (!last_sep) {
+        out_name[j++] = '_';
+        last_sep = true;
+      }
+    }
+  }
+
+  if (j > 0 && out_name[j - 1] == '_') {
+    out_name[--j] = '\0';
+  } else {
+    out_name[j] = '\0';
+  }
+
+  if (strcmp(out_name, "wakeonlan") == 0) {
+    snprintf(out_name, out_name_size, "wake_on_lan");
+  } else if (strcmp(out_name, "websearch") == 0) {
+    snprintf(out_name, out_name_size, "web_search");
+  } else if (strcmp(out_name, "httprequest") == 0) {
+    snprintf(out_name, out_name_size, "http_request");
+  }
 }
 
 static void build_tools_json(void) {
@@ -200,15 +239,47 @@ esp_err_t tool_registry_init(void) {
   /* Register wake_on_lan */
   mimi_tool_t wol = {
       .name = "wake_on_lan",
-      .description = "Send a Wake-on-LAN Magic Packet to a MAC address.",
+      .description = "Send a Wake-on-LAN Magic Packet. You can call this with "
+                     "mac directly, or use label/hostname/ip from list_devices "
+                     "to target a specific registered target.",
       .input_schema_json =
           "{\"type\":\"object\","
-          "\"properties\":{\"mac\":{\"type\":\"string\",\"description\":\"MAC "
-          "address (AA:BB:CC:DD:EE:FF)\"}},"
-          "\"required\":[\"mac\"]}",
+          "\"properties\":{"
+          "\"mac\":{\"type\":\"string\",\"description\":\"MAC address "
+          "(AA:BB:CC:DD:EE:FF) - preferred when known\"},"
+          "\"device\":{\"type\":\"string\",\"description\":\"Registered device "
+          "label/name from list_devices\"},"
+          "\"label\":{\"type\":\"string\",\"description\":\"Alias or friendly "
+          "name in wol_devices.json\"},"
+          "\"hostname\":{\"type\":\"string\",\"description\":\"Device hostname "
+          "to match\"},"
+          "\"ip\":{\"type\":\"string\",\"description\":\"Device IPv4 address "
+          "to match\"}"
+          "},\"required\":[]}",
       .execute = tool_wol_execute,
   };
   register_tool(&wol);
+
+  mimi_tool_t wreg = {
+      .name = "wol_register",
+      .description =
+          "Register or update a WOL device entry (MAC, label, optional ip/"
+          "hostname).",
+      .input_schema_json =
+          "{\"type\":\"object\","
+          "\"properties\":{"
+          "\"label\":{\"type\":\"string\",\"description\":\"Friendly device "
+          "name\"},"
+          "\"name\":{\"type\":\"string\",\"description\":\"Alias for the device "
+          "(also accepted as label)\"},"
+          "\"mac\":{\"type\":\"string\",\"description\":\"MAC address in AA:BB:CC:DD:EE:FF format\"},"
+          "\"ip\":{\"type\":\"string\",\"description\":\"Optional device IP\"},"
+          "\"hostname\":{\"type\":\"string\",\"description\":\"Optional hostname\"}"
+          "},"
+          "\"required\":[\"mac\"]}",
+      .execute = tool_wol_register_execute,
+  };
+  register_tool(&wreg);
 
   /* Register list_devices */
   mimi_tool_t ld_dev = {
@@ -291,9 +362,19 @@ const char *tool_registry_get_tools_json(void) { return s_tools_json; }
 
 esp_err_t tool_registry_execute(const char *name, const char *input_json,
                                 char *output, size_t output_size) {
+  if (!name || !output || output_size == 0)
+    return ESP_ERR_INVALID_ARG;
+
+  char canonical_name[32] = {0};
+  normalize_tool_name_for_registry(name, canonical_name, sizeof(canonical_name));
+  if (canonical_name[0] == '\0')
+    return ESP_ERR_INVALID_ARG;
+
+  const char *lookup_name = canonical_name;
+
   for (int i = 0; i < s_tool_count; i++) {
-    if (strcmp(s_tools[i].name, name) == 0) {
-      ESP_LOGI(TAG, "Executing tool: %s", name);
+    if (strcmp(s_tools[i].name, lookup_name) == 0) {
+      ESP_LOGI(TAG, "Executing tool: %s", lookup_name);
       return s_tools[i].execute(input_json, output, output_size);
     }
   }

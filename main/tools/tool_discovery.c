@@ -13,9 +13,12 @@
 #include "mimi_config.h"
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <stdbool.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/socket.h>
 
 static const char *TAG = "tool_discovery";
@@ -29,6 +32,304 @@ static char s_last_job_id[16] = "0";
 #ifndef NI_NAMEREQD
 #define NI_NAMEREQD 8
 #endif
+#define WOL_UNKNOWN_VALUE "unknown"
+
+/* Shared helpers */
+
+static bool is_unknown_value(const char *value) {
+  return (!value || *value == '\0' ||
+          strcasecmp(value, WOL_UNKNOWN_VALUE) == 0);
+}
+
+static const char *get_known_string(const cJSON *obj, const char *key) {
+  const cJSON *item = cJSON_GetObjectItem(obj, key);
+  if (!item || !cJSON_IsString(item) || is_unknown_value(item->valuestring)) {
+    return NULL;
+  }
+  return item->valuestring;
+}
+
+static void set_string_field(cJSON *obj, const char *key, const char *value) {
+  const char *safe = is_unknown_value(value) ? WOL_UNKNOWN_VALUE : value;
+  cJSON *node = cJSON_CreateString(safe);
+  if (!node) {
+    return;
+  }
+
+  if (cJSON_GetObjectItem(obj, key)) {
+    cJSON_ReplaceItemInObject(obj, key, node);
+  } else {
+    cJSON_AddItemToObject(obj, key, node);
+  }
+}
+
+static void set_number_field(cJSON *obj, const char *key, double value) {
+  cJSON *node = cJSON_CreateNumber(value);
+  if (!node) {
+    return;
+  }
+
+  if (cJSON_GetObjectItem(obj, key)) {
+    cJSON_ReplaceItemInObject(obj, key, node);
+  } else {
+    cJSON_AddItemToObject(obj, key, node);
+  }
+}
+
+static cJSON *load_wol_devices_json(void) {
+  FILE *f = fopen(MIMI_WOL_DEVICES_FILE, "r");
+  if (!f) {
+    return cJSON_CreateArray();
+  }
+
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  char *data = NULL;
+  cJSON *root = NULL;
+  if (size > 0) {
+    data = malloc(size + 1);
+    if (data) {
+      fread(data, 1, size, f);
+      data[size] = '\0';
+      root = cJSON_Parse(data);
+      free(data);
+    }
+  }
+  fclose(f);
+
+  if (!root || !cJSON_IsArray(root)) {
+    cJSON_Delete(root);
+    return cJSON_CreateArray();
+  }
+  return root;
+}
+
+static bool has_known_number(const cJSON *obj, const char *key) {
+  const cJSON *item = cJSON_GetObjectItem(obj, key);
+  return item && cJSON_IsNumber(item);
+}
+
+static void persist_wol_devices(cJSON *root) {
+  if (!root || !cJSON_IsArray(root)) {
+    return;
+  }
+
+  char *out = cJSON_PrintUnformatted(root);
+  if (!out) {
+    return;
+  }
+
+  FILE *f = fopen(MIMI_WOL_DEVICES_FILE, "w");
+  if (f) {
+    fputs(out, f);
+    fclose(f);
+  }
+  free(out);
+}
+
+static bool device_matches_selector(const cJSON *dev, const char *selector) {
+  if (!selector || !*selector) {
+    return false;
+  }
+
+  const char *fields[] = {"label", "name", "hostname", "ip", "mac", NULL};
+  for (int i = 0; fields[i]; i++) {
+    const char *value = get_known_string(dev, fields[i]);
+    if (value && strcasecmp(value, selector) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static cJSON *collect_matching_devices(const char *selector) {
+  cJSON *devices = load_wol_devices_json();
+  cJSON *matches = cJSON_CreateArray();
+  if (!matches) {
+    cJSON_Delete(devices);
+    return NULL;
+  }
+
+  if (!selector || !*selector || !cJSON_IsArray(devices)) {
+    cJSON_Delete(devices);
+    return matches;
+  }
+
+  cJSON *item;
+  cJSON_ArrayForEach(item, devices) {
+    if (!cJSON_IsObject(item)) {
+      continue;
+    }
+    if (!device_matches_selector(item, selector)) {
+      continue;
+    }
+
+    cJSON *entry = cJSON_CreateObject();
+    if (!entry) {
+      continue;
+    }
+    set_string_field(entry, "label", get_known_string(item, "label"));
+    set_string_field(entry, "name", get_known_string(item, "name"));
+    set_string_field(entry, "hostname", get_known_string(item, "hostname"));
+    set_string_field(entry, "ip", get_known_string(item, "ip"));
+    set_string_field(entry, "mac", get_known_string(item, "mac"));
+    cJSON_AddItemToArray(matches, entry);
+  }
+  cJSON_Delete(devices);
+  return matches;
+}
+
+static void ensure_device_defaults(cJSON *dev, const char *ip, const char *mac,
+                                 const char *hostname) {
+  const char *resolved_label =
+      get_known_string(dev, "label"); // May already be manually edited.
+  if (!resolved_label && hostname && !is_unknown_value(hostname)) {
+    resolved_label = hostname;
+  }
+  if (!resolved_label && ip && *ip) {
+    resolved_label = ip;
+  }
+  if (!resolved_label) {
+    resolved_label = WOL_UNKNOWN_VALUE;
+  }
+
+  set_string_field(dev, "label", resolved_label);
+  set_string_field(dev, "name", resolved_label);
+  set_string_field(dev, "ip", ip);
+  if (mac) {
+    set_string_field(dev, "mac", mac);
+  } else {
+    set_string_field(dev, "mac", WOL_UNKNOWN_VALUE);
+  }
+  if (hostname) {
+    set_string_field(dev, "hostname", hostname);
+  } else {
+    set_string_field(dev, "hostname", WOL_UNKNOWN_VALUE);
+  }
+
+  time_t now = time(NULL);
+  if (!has_known_number(dev, "discovered_at")) {
+    set_number_field(dev, "discovered_at", (double)now);
+  }
+  set_number_field(dev, "updated_at", (double)now);
+}
+
+static bool update_or_create_wol_device(cJSON *devices, const char *label,
+                                       const char *mac, const char *ip,
+                                       const char *hostname) {
+  bool found = false;
+  if (!devices || !cJSON_IsArray(devices) || !mac) {
+    return false;
+  }
+
+  cJSON *item = NULL;
+  cJSON_ArrayForEach(item, devices) {
+    if (!cJSON_IsObject(item)) {
+      continue;
+    }
+
+    const char *j_mac = get_known_string(item, "mac");
+    if (!j_mac || strcasecmp(j_mac, mac) != 0) {
+      continue;
+    }
+
+    if (ip) {
+      set_string_field(item, "ip", ip);
+    }
+    if (hostname) {
+      set_string_field(item, "hostname", hostname);
+    }
+    if (label) {
+      set_string_field(item, "label", label);
+      set_string_field(item, "name", label);
+    }
+    ensure_device_defaults(item, ip ? ip : get_known_string(item, "ip"), mac,
+                          hostname ? hostname : get_known_string(item, "hostname"));
+    found = true;
+    break;
+  }
+
+  if (!found) {
+    cJSON *dev = cJSON_CreateObject();
+    if (!dev) {
+      return false;
+    }
+    ensure_device_defaults(dev, ip, mac, hostname);
+    if (label) {
+      set_string_field(dev, "label", label);
+      set_string_field(dev, "name", label);
+    }
+    cJSON_AddItemToArray(devices, dev);
+    found = true;
+  }
+
+  return found;
+}
+
+esp_err_t tool_wol_register_execute(const char *input_json, char *output,
+                                   size_t output_size) {
+  cJSON *root = cJSON_Parse(input_json);
+  if (!root) {
+    snprintf(output, output_size, "Error: invalid JSON");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const char *mac = cJSON_GetStringValue(cJSON_GetObjectItem(root, "mac"));
+  const char *label = cJSON_GetStringValue(cJSON_GetObjectItem(root, "label"));
+  const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(root, "name"));
+  const char *ip = cJSON_GetStringValue(cJSON_GetObjectItem(root, "ip"));
+  const char *hostname = cJSON_GetStringValue(cJSON_GetObjectItem(root, "hostname"));
+
+  if (!label && name) {
+    label = name;
+  }
+  if (!mac) {
+    cJSON_Delete(root);
+    snprintf(output, output_size, "Error: missing required field 'mac'");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  uint8_t mac_addr[6];
+  if (sscanf(mac, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac_addr[0], &mac_addr[1],
+             &mac_addr[2], &mac_addr[3], &mac_addr[4], &mac_addr[5]) != 6) {
+    cJSON_Delete(root);
+    snprintf(output, output_size,
+             "Error: invalid MAC format (use AA:BB:CC:DD:EE:FF)");
+    return ESP_ERR_INVALID_ARG;
+  }
+  (void)mac_addr; /* parsed for validation only */
+
+  cJSON *devices = load_wol_devices_json();
+  if (!devices || !cJSON_IsArray(devices)) {
+    cJSON_Delete(root);
+    cJSON_Delete(devices);
+    snprintf(output, output_size, "Error: failed to load WOL registry");
+    return ESP_FAIL;
+  }
+
+  if (!update_or_create_wol_device(devices, label, mac, ip, hostname)) {
+    cJSON_Delete(root);
+    cJSON_Delete(devices);
+    snprintf(output, output_size, "Error: failed to update WOL registry");
+    return ESP_FAIL;
+  }
+
+  persist_wol_devices(devices);
+  cJSON_Delete(devices);
+  cJSON_Delete(root);
+
+  if (label) {
+    snprintf(output, output_size, "OK: registered WOL device %s (%s)", label, mac);
+  } else if (ip) {
+    snprintf(output, output_size, "OK: updated WOL device %s (%s)", ip, mac);
+  } else {
+    snprintf(output, output_size, "OK: updated WOL device %s", mac);
+  }
+
+  return ESP_OK;
+}
 
 /* ── Wake on LAN ───────────────────────────────────────────── */
 
@@ -42,10 +343,82 @@ esp_err_t tool_wol_execute(const char *input_json, char *output,
   }
 
   const char *mac_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "mac"));
+  char resolved_mac_buf[20] = {0};
+  const char *selector = cJSON_GetStringValue(cJSON_GetObjectItem(root, "device"));
+  if (!selector) {
+    selector = cJSON_GetStringValue(cJSON_GetObjectItem(root, "label"));
+  }
+  if (!selector) {
+    selector = cJSON_GetStringValue(cJSON_GetObjectItem(root, "hostname"));
+  }
+  if (!selector) {
+    selector = cJSON_GetStringValue(cJSON_GetObjectItem(root, "ip"));
+  }
+  if (!selector) {
+    selector = cJSON_GetStringValue(cJSON_GetObjectItem(root, "name"));
+  }
+
+  if (!mac_str && selector) {
+    cJSON *matches = collect_matching_devices(selector);
+    if (!matches) {
+      snprintf(output, output_size, "Error: WOL registry unavailable");
+      cJSON_Delete(root);
+      return ESP_FAIL;
+    }
+
+    int match_count = cJSON_GetArraySize(matches);
+    if (match_count == 0) {
+      cJSON_Delete(matches);
+      cJSON_Delete(root);
+      snprintf(output, output_size,
+               "Error: no device found. Run `list_devices` and use a device "
+               "label/hostname/ip exactly.");
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    if (match_count > 1) {
+      char *list_json = cJSON_PrintUnformatted(matches);
+      if (list_json) {
+        snprintf(output, output_size,
+                 "Error: multiple devices matched '%s'. Specify one of: %s",
+                 selector, list_json);
+        free(list_json);
+      } else {
+        snprintf(output, output_size,
+                 "Error: multiple devices matched '%s'. Specify a unique "
+                 "label/hostname/ip.",
+                 selector);
+      }
+      cJSON_Delete(matches);
+      cJSON_Delete(root);
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *single = cJSON_GetArrayItem(matches, 0);
+    const char *resolved_mac = cJSON_GetStringValue(
+        cJSON_GetObjectItem(single, "mac"));
+    if (is_unknown_value(resolved_mac)) {
+      cJSON_Delete(matches);
+      cJSON_Delete(root);
+      snprintf(output, output_size,
+               "Error: selected device has no known MAC yet. Run a scan and "
+               "try again.");
+      return ESP_ERR_INVALID_ARG;
+    }
+    snprintf(resolved_mac_buf, sizeof(resolved_mac_buf), "%s", resolved_mac);
+    mac_str = resolved_mac_buf;
+    cJSON_Delete(matches);
+  }
+
   if (!mac_str) {
-    snprintf(output, output_size, "Error: missing mac parameter");
     cJSON_Delete(root);
+    snprintf(output, output_size, "Error: missing mac or device/label/hostname/ip");
     return ESP_ERR_INVALID_ARG;
+  }
+
+  if (selector && !cJSON_GetObjectItem(root, "mac")) {
+    ESP_LOGI(TAG, "Executing wol_send for selector=%s resolved_mac=%s", selector,
+             mac_str);
   }
 
   uint8_t mac[6];
@@ -86,7 +459,12 @@ esp_err_t tool_wol_execute(const char *input_json, char *output,
   if (sent < 0) {
     snprintf(output, output_size, "Error: failed to send Magic Packet");
   } else {
-    snprintf(output, output_size, "OK: Magic Packet sent to %s", mac_str);
+    if (selector) {
+      snprintf(output, output_size, "OK: Magic Packet sent to %s (%s)", selector,
+               mac_str);
+    } else {
+      snprintf(output, output_size, "OK: Magic Packet sent to %s", mac_str);
+    }
   }
 
   cJSON_Delete(root);
@@ -97,80 +475,53 @@ esp_err_t tool_wol_execute(const char *input_json, char *output,
 
 static void save_discovered_device(const char *ip, const char *mac,
                                    const char *hostname) {
-  char *data = NULL;
-  FILE *f = fopen(MIMI_WOL_DEVICES_FILE, "r");
-  if (f) {
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    data = malloc(size + 1);
-    if (data) {
-      fread(data, 1, size, f);
-      data[size] = '\0';
-    }
-    fclose(f);
-  }
-
-  cJSON *root = data ? cJSON_Parse(data) : cJSON_CreateArray();
-  free(data);
-  if (!root)
+  cJSON *root = load_wol_devices_json();
+  if (!root) {
     root = cJSON_CreateArray();
+  }
 
   bool found = false;
   cJSON *item;
   cJSON_ArrayForEach(item, root) {
-    cJSON *j_ip = cJSON_GetObjectItem(item, "ip");
-    if (j_ip && strcmp(j_ip->valuestring, ip) == 0) {
-      if (mac && strlen(mac) > 0 && strcmp(mac, "unknown") != 0)
-        cJSON_ReplaceItemInObject(item, "mac", cJSON_CreateString(mac));
-      if (hostname && strlen(hostname) > 0 && strcmp(hostname, "unknown") != 0)
-        cJSON_ReplaceItemInObject(item, "hostname",
-                                  cJSON_CreateString(hostname));
+    if (!cJSON_IsObject(item)) {
+      continue;
+    }
+
+    const char *j_ip = get_known_string(item, "ip");
+    if (j_ip && strcmp(j_ip, ip) == 0) {
       found = true;
+      ensure_device_defaults(item, ip, mac, hostname);
       break;
     }
   }
 
   if (!found) {
     cJSON *dev = cJSON_CreateObject();
-    cJSON_AddStringToObject(dev, "ip", ip);
-    cJSON_AddStringToObject(dev, "mac", mac ? mac : "unknown");
-    cJSON_AddStringToObject(dev, "hostname", hostname ? hostname : "unknown");
+    ensure_device_defaults(dev, ip, mac, hostname);
     cJSON_AddItemToArray(root, dev);
   }
 
-  char *out = cJSON_PrintUnformatted(root);
-  if (out) {
-    f = fopen(MIMI_WOL_DEVICES_FILE, "w");
-    if (f) {
-      fputs(out, f);
-      fclose(f);
-    }
-    free(out);
-  }
+  persist_wol_devices(root);
   cJSON_Delete(root);
 }
 
 esp_err_t tool_list_devices_execute(const char *input_json, char *output,
                                     size_t output_size) {
-  FILE *f = fopen(MIMI_WOL_DEVICES_FILE, "r");
-  if (!f) {
+  cJSON *root = load_wol_devices_json();
+  if (!root || cJSON_GetArraySize(root) == 0) {
     snprintf(output, output_size, "[]");
+    cJSON_Delete(root);
     return ESP_OK;
   }
 
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  char *data = malloc(size + 1);
-  if (data) {
-    fread(data, 1, size, f);
-    data[size] = '\0';
-    snprintf(output, output_size, "%s", data);
-    free(data);
+  char *out = cJSON_PrintUnformatted(root);
+  if (out) {
+    snprintf(output, output_size, "%s", out);
+    free(out);
+  } else {
+    snprintf(output, output_size, "[]");
   }
-  fclose(f);
+  cJSON_Delete(root);
 
   return ESP_OK;
 }
@@ -318,21 +669,9 @@ esp_err_t tool_wol_scan_result_execute(const char *input_json, char *output,
   cJSON_AddStringToObject(root, "status",
                           s_scan_active ? "running" : "completed");
   cJSON_AddNumberToObject(root, "progress", s_scan_progress);
-
-  /* List recently discovered devices */
-  FILE *f = fopen(MIMI_WOL_DEVICES_FILE, "r");
-  if (f) {
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *data = malloc(size + 1);
-    if (data) {
-      fread(data, 1, size, f);
-      data[size] = '\0';
-      cJSON_AddItemToObject(root, "devices", cJSON_Parse(data));
-      free(data);
-    }
-    fclose(f);
+  cJSON *devices = load_wol_devices_json();
+  if (cJSON_IsArray(devices)) {
+    cJSON_AddItemToObject(root, "devices", devices);
   } else {
     cJSON_AddItemToObject(root, "devices", cJSON_CreateArray());
   }

@@ -8,10 +8,12 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "nvs.h"
+#include "freertos/task.h"
 #include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "telegram";
+static const int TELEGRAM_SEND_TIMEOUT_MS = 4000;
 
 static char s_bot_token[128] = MIMI_SECRET_TG_TOKEN;
 static int64_t s_update_offset = 0;
@@ -67,9 +69,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
 
 /* ── Proxy path: manual HTTP over CONNECT tunnel ────────────── */
 
-static char *tg_api_call_via_proxy(const char *path, const char *post_data) {
-  proxy_conn_t *conn = proxy_conn_open("api.telegram.org", 443,
-                                       (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000);
+static char *tg_api_call_via_proxy(const char *path, const char *post_data,
+                                   int timeout_ms) {
+  proxy_conn_t *conn = proxy_conn_open("api.telegram.org", 443, timeout_ms);
   if (!conn)
     return NULL;
 
@@ -109,7 +111,7 @@ static char *tg_api_call_via_proxy(const char *path, const char *post_data) {
     return NULL;
   }
 
-  int timeout = (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000;
+  int timeout = timeout_ms;
   while (1) {
     if (len + 1024 >= cap) {
       cap *= 2;
@@ -142,7 +144,8 @@ static char *tg_api_call_via_proxy(const char *path, const char *post_data) {
 
 /* ── Direct path: esp_http_client ───────────────────────────── */
 
-static char *tg_api_call_direct(const char *method, const char *post_data) {
+static char *tg_api_call_direct(const char *method, const char *post_data,
+                               int timeout_ms) {
   char url[256];
   snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/%s", s_bot_token,
            method);
@@ -159,7 +162,7 @@ static char *tg_api_call_direct(const char *method, const char *post_data) {
       .url = url,
       .event_handler = http_event_handler,
       .user_data = &resp,
-      .timeout_ms = (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000,
+      .timeout_ms = timeout_ms,
       .buffer_size = 2048,
       .buffer_size_tx = 2048,
       .crt_bundle_attach = esp_crt_bundle_attach,
@@ -189,11 +192,17 @@ static char *tg_api_call_direct(const char *method, const char *post_data) {
   return resp.buf;
 }
 
-static char *tg_api_call(const char *method, const char *post_data) {
+static char *tg_api_call_with_timeout(const char *method, const char *post_data,
+                                     int timeout_ms) {
   if (http_proxy_is_enabled()) {
-    return tg_api_call_via_proxy(method, post_data);
+    return tg_api_call_via_proxy(method, post_data, timeout_ms);
   }
-  return tg_api_call_direct(method, post_data);
+  return tg_api_call_direct(method, post_data, timeout_ms);
+}
+
+static char *tg_api_call(const char *method, const char *post_data) {
+  return tg_api_call_with_timeout(method, post_data,
+                                  (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000);
 }
 
 static void process_updates(const char *json_str) {
@@ -373,33 +382,22 @@ esp_err_t telegram_bot_start(void) {
   return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
 
-static bool is_md_word_or_hyphen_char(char c) {
-  return ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-          (c >= '0' && c <= '9') || c == '_' || c == '-');
-}
-
-/* Simple Markdown to HTML converter for Telegram */
-static char *tg_markdown_to_html(const char *md) {
-  if (!md)
+static char *telegram_escape_html(const char *text) {
+  if (!text)
     return NULL;
 
-  size_t in_len = strlen(md);
-  /* HTML can be larger than markdown due to tags and escaping,
-   * Allocate 2x buffer up front to avoid frequent reallocs */
-  size_t cap = in_len * 2 + 128;
+  size_t in_len = strlen(text);
+  size_t cap = in_len * 6 + 1; /* worst-case: "&" -> "&amp;" */
   char *out = malloc(cap);
   if (!out)
     return NULL;
 
-  const char *src = md;
+  const char *src = text;
   char *dst = out;
-  bool bold = false, italic = false, code = false, pre = false;
-
   while (*src) {
-    /* Safety check for buffer space */
-    if ((dst - out) + 16 >= cap) {
-      size_t offset = dst - out;
+    if ((size_t)(dst - out) + 6 >= cap) {
       cap *= 2;
+      size_t offset = dst - out;
       char *tmp = realloc(out, cap);
       if (!tmp) {
         free(out);
@@ -409,139 +407,20 @@ static char *tg_markdown_to_html(const char *md) {
       dst = out + offset;
     }
 
-    if (!code && !pre && strncmp(src, "```", 3) == 0) {
-      pre = true;
-      strcpy(dst, "<pre>");
+    if (*src == '<') {
+      memcpy(dst, "&lt;", 4);
+      dst += 4;
+    } else if (*src == '>') {
+      memcpy(dst, "&gt;", 4);
+      dst += 4;
+    } else if (*src == '&') {
+      memcpy(dst, "&amp;", 5);
       dst += 5;
-      src += 3;
-    } else if (pre && strncmp(src, "```", 3) == 0) {
-      pre = false;
-      strcpy(dst, "</pre>");
-      dst += 6;
-      src += 3;
-    } else if (!pre && strncmp(src, "`", 1) == 0) {
-      if (!code) {
-        strcpy(dst, "<code>");
-        dst += 6;
-      } else {
-        strcpy(dst, "</code>");
-        dst += 7;
-      }
-      code = !code;
-      src += 1;
-    } else if (!code && !pre &&
-               (strncmp(src, "**", 2) == 0 || strncmp(src, "__", 2) == 0)) {
-      if (!bold) {
-        strcpy(dst, "<b>");
-        dst += 3;
-      } else {
-        strcpy(dst, "</b>");
-        dst += 4;
-      }
-      bold = !bold;
-      src += 2;
-    } else if (!code && !pre && *src == '[') {
-      const char *close = strchr(src, ']');
-      if (close && close > src + 1) {
-        bool word = true;
-        bool has_underscore = false;
-        for (const char *p = src + 1; p < close; p++) {
-          if (*p == '_')
-            has_underscore = true;
-          if (!is_md_word_or_hyphen_char(*p)) {
-            word = false;
-            break;
-          }
-        }
-
-        if (word && has_underscore) {
-          for (const char *p = src; p <= close; p++) {
-            if (*p == '<') {
-              strcpy(dst, "&lt;");
-              dst += 4;
-            } else if (*p == '>') {
-              strcpy(dst, "&gt;");
-              dst += 4;
-            } else if (*p == '&') {
-              strcpy(dst, "&amp;");
-              dst += 5;
-            } else {
-              *dst++ = *p;
-            }
-          }
-          src = close + 1;
-          continue;
-        }
-      }
-    } else if (!code && !pre && strncmp(src, "*", 1) == 0) {
-      if (!italic) {
-        strcpy(dst, "<i>");
-        dst += 3;
-      } else {
-        strcpy(dst, "</i>");
-        dst += 4;
-      }
-      italic = !italic;
-      src += 1;
-    } else if (!code && !pre && strncmp(src, "_", 1) == 0) {
-      const char prev = (src == md) ? '\0' : src[-1];
-      const char next = src[1];
-      bool prev_word = (prev != '\0') &&
-                       ((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
-                        (prev >= '0' && prev <= '9') || prev == '_');
-      bool next_word = (next != '\0') &&
-                       ((next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') ||
-                        (next >= '0' && next <= '9') || next == '_');
-
-      if (prev_word && next_word) {
-        *dst++ = *src++;
-      } else {
-        if (!italic) {
-          strcpy(dst, "<i>");
-          dst += 3;
-        } else {
-          strcpy(dst, "</i>");
-          dst += 4;
-        }
-        italic = !italic;
-        src += 1;
-      }
     } else {
-      /* Literal character with HTML escaping if not in code/pre */
-      if (*src == '<') {
-        strcpy(dst, "&lt;");
-        dst += 4;
-      } else if (*src == '>') {
-        strcpy(dst, "&gt;");
-        dst += 4;
-      } else if (*src == '&') {
-        strcpy(dst, "&amp;");
-        dst += 5;
-      } else {
-        *dst++ = *src;
-      }
-      src++;
+      *dst++ = *src;
     }
+    src++;
   }
-
-  /* Close any hanging tags */
-  if (bold) {
-    strcpy(dst, "</b>");
-    dst += 4;
-  }
-  if (italic) {
-    strcpy(dst, "</i>");
-    dst += 4;
-  }
-  if (code) {
-    strcpy(dst, "</code>");
-    dst += 7;
-  }
-  if (pre) {
-    strcpy(dst, "</pre>");
-    dst += 6;
-  }
-
   *dst = '\0';
   return out;
 }
@@ -550,6 +429,10 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text) {
   if (s_bot_token[0] == '\0') {
     ESP_LOGW(TAG, "Cannot send: no bot token");
     return ESP_ERR_INVALID_STATE;
+  }
+  if (!text) {
+    ESP_LOGW(TAG, "Cannot send: text is NULL");
+    return ESP_ERR_INVALID_ARG;
   }
 
   /* Split long messages at 4096-char boundary */
@@ -575,8 +458,8 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text) {
     memcpy(segment, text + offset, chunk);
     segment[chunk] = '\0';
 
-    /* Convert Markdown to HTML */
-    char *html_text = tg_markdown_to_html(segment);
+    /* Escape HTML entities and keep plain message format */
+    char *html_text = telegram_escape_html(segment);
     if (!html_text) {
       cJSON_Delete(body);
       free(segment);
@@ -592,7 +475,8 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text) {
     free(segment);
 
     if (json_str) {
-      char *resp = tg_api_call("sendMessage", json_str);
+      char *resp = tg_api_call_with_timeout(
+          "sendMessage", json_str, TELEGRAM_SEND_TIMEOUT_MS);
       free(json_str);
       if (resp) {
         cJSON *root = cJSON_Parse(resp);

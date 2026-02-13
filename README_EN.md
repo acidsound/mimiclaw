@@ -169,6 +169,7 @@ MimiClaw enforces strict **directory-based isolation** to protect your data.
 | `USER.md` | Public | Info about you — name, preferences, language |
 | `MEMORY.md` | Public | Long-term memory — things the bot should always remember |
 | `SESSIONS.json` | Private | Persistent HTTP session cookies |
+| `wol_devices.json` | Private | Registered WOL devices (`label`, `name`, `ip`, `hostname`, `mac`) |
 | `SECRET.env` | Private | External API keys for the `http_request` tool |
 | `tg_12345.jsonl` | Private | Chat history — your conversation with the bot |
 
@@ -180,7 +181,8 @@ MimiClaw uses Anthropic's tool use protocol (ReAct pattern). Claude can call too
 |------|-------------|
 | `web_search` | Search the web via Brave Search API for current information |
 | `http_request` | **(Secure)** GET/POST with SSRF protection and secret substitution |
-| `wake_on_lan` | Send Magic Packets to wake up devices in your home lab |
+| `wake_on_lan` | Send Magic Packets to wake up devices in your home lab. You can call with mac or device label/hostname/ip from `list_devices`. |
+| `wol_register` | Register or update a WOL target by `mac` with optional `label`, `hostname`, or `ip`. |
 | `list_devices` | List hosts found via background ICMP subnet scanning |
 | `get_current_time` | Fetch current date/time via HTTP and set the system clock |
 

@@ -988,11 +988,18 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
   if (!post_data)
     return ESP_ERR_NO_MEM;
 
+  int tool_count = 0;
+  cJSON *tools_arr = tools_json ? cJSON_Parse(tools_json) : NULL;
+  if (tools_arr && cJSON_IsArray(tools_arr)) {
+    tool_count = cJSON_GetArraySize(tools_arr);
+  }
+  cJSON_Delete(tools_arr);
+
   ESP_LOGI(TAG, "[LLM_CALL] provider=%s, model=%s, body=%d bytes, tools=%d",
            (provider == MIMI_LLM_PROVIDER_ANTHROPIC) ? "Anthropic"
                                                      : "OpenAI/Compatible",
            s_model, (int)strlen(post_data),
-           tools_json ? cJSON_GetArraySize(cJSON_Parse(tools_json)) : 0);
+           tool_count);
 
   /* HTTP call */
   resp_buf_t rb;
@@ -1119,6 +1126,9 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
 
       resp->call_count++;
     }
+
+    if (resp->call_count > 0)
+      resp->tool_use = true;
   } else {
     /* Try OpenAI style fallback (choices[0].message.content) */
     cJSON *choices = cJSON_GetObjectItem(root, "choices");
@@ -1185,6 +1195,9 @@ esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
               }
               resp->call_count++;
             }
+
+            if (resp->call_count > 0)
+              resp->tool_use = true;
           }
         }
 

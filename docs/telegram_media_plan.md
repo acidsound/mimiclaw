@@ -1,52 +1,65 @@
 # Telegram Media Handling Plan
 
-## Goal
-Deliver Phase 2 of the "Telegram Media Handling" initiative: accept Telegram photo/voice updates, forward photos to the LLM as image blocks, and transcribe voice notes via Groq Whisper while keeping ESP32-S3 RAM usage under 32 KB per streaming buffer.
+## Current Status (2026-02-13)
 
-## Current State Recap
-- Incoming updates already differentiate text/photo/voice (`telegram_bot.c`).
-- Media downloads still allocate full buffers in PSRAM; no chunked streaming exists.
-- Vision pathway encodes photos to base64 inside `agent_loop.c`, but the helper lives in `llm_proxy.c` and needs hardening for large inputs.
-- Voice STT works end-to-end via Groq, yet it loads the full .oga before posting and is tightly coupled to the agent loop rather than an isolated tool interface.
+- `telegram_bot.c` can now detect voice and photo attachments and pass through metadata to agent flow.
+- `llm_proxy.c` supports text/image content blocks for vision-capable providers.
+- `tool_stt.c` implements Groq Whisper STT tool integration; voice is transcribed via Telegram `file_id`.
+- WOL workflow now supports explicit device registration by tool: `wol_register` in addition to discovery tools.
+- `tool_files.c` now normalizes legacy `wol_devices` paths and allows `/spiffs/private/wol_devices.json` updates through file tools.
+- `context_builder.c` was tightened to reduce hallucinated tool use, enforce one tool call pattern, and improve no-result guidance.
+
+## Completed
+
+- Tool set in runtime now includes: `web_search`, `get_current_time`, `read_file`, `write_file`, `edit_file`, `list_dir`, `heap_info`, `http_request`, `stt_transcribe`, `wake_on_lan`, `list_devices`, `wol_scan_start`, `wol_scan_result`, `restart`, `memory_write`, `memory_append`, `wol_register`.
+- System prompt documents exact tool names and conservative execution policy (single-call-per-tool, avoid retries with same payload).
+- WOL registry persistence is robust against legacy path use (`/spiffs/wol_devices.json` alias -> `/spiffs/private/wol_devices.json`).
+- STT response handling now surfaces explicit failure cases and zero-result search responses.
 
 ## Design Principles
-1. **Stream, don't store**: reuse the HTTP proxy layer to pull Telegram file content in ≤32 KB chunks and push directly into the consumer (base64 encoder or STT uploader).
-2. **Single media surface**: introduce a `telegram_media_stream` API that hides getFile + download plumbing and exposes callbacks for chunk consumption.
-3. **Composable tools**: treat STT as an optional tool exposed through the tool registry so other contexts (e.g., scheduled jobs) can trigger transcriptions.
-4. **Back-pressure awareness**: chunked callbacks must be able to abort early if the downstream detects quota overruns.
+1. **Stream, don't store**: Telegram media should be downloaded and consumed in bounded chunks to stay within heap limits.
+2. **Single media surface**: keep one streaming path for Telegram media download and adapt downstream consumers.
+3. **Composable tools**: STT is available as an explicit tool (`stt_transcribe`) with strict JSON input.
+4. **Fail-closed safety**: reject oversized/invalid payloads before costly processing and explain limits to users.
+
+## Tool-calling Alignment Checklist (must hold before release)
+- [x] Tool prompt mirrors runtime registry exactly (`get_current_time`, `stt_transcribe`, `wol_scan_*`, `memory_*` etc. included).
+- [x] Explicit instruction for `tool_use` vs `tool_calls` is present.
+- [x] Non-tool response path exists for ordinary chat (no unnecessary tool invocations).
+- [x] WOL flow: `list_devices` before `wake_on_lan` and one-identifier-at-a-time.
+- [x] Voice request path uses `stt_transcribe` with `file_id` and includes user-facing failure notice when STT unavailable.
+- [ ] Vision/photo path still needs full migration to bounded in-memory/base64 streaming.
+- [ ] STT upload path should avoid fallback full-buffer flow and use direct streaming.
+- [ ] Add reproducible end-to-end stack/memory regression checks under `idf.py monitor`.
+- [ ] Add a long-run stress test that alternates media + tool bursts to guard against Task WDT regressions.
 
 ## Work Breakdown
 1. **Chunked Telegram Fetch (Owner: Telegram module)**
-   - Implement `telegram_stream_file(file_id, on_chunk, ctx)` that internally resolves `file_id` → `file_path`, issues HTTPS GET, and feeds chunks (size parameterized, default 16 KB) to the callback. Abort on callback != `ESP_OK`.
-   - Extend proxy path to support CONNECT + streaming reads without storing whole payloads.
+   - Remaining: introduce a bounded fetch callback API and remove full buffering from photo/voice pipelines.
 2. **Vision Path Refactor (Owner: Agent + LLM)**
-   - Move base64 encoding helpers to `utils/base64_stream.c` (new) that can consume chunk callbacks.
-   - Update `agent_loop.c` to invoke the streaming encoder; keep only captions in RAM.
-3. **STT Toolization (Owner: Tools + LLM)**
-   - Create `tools/tool_stt.c` exposing `stt_transcribe` with JSON schema `{ "file_id": string }`.
-   - Internally leverage the Telegram stream API and forward chunks to a new `llm_stt_stream_upload` that builds a multipart request incrementally (use chunked transfer or pre-sized buffers via temporary SPIFFS file if necessary).
-   - Preserve current auto-STT path by calling the tool internally after enqueueing a synthetic tool request.
+   - Remaining: move to streaming base64 path and keep only caption metadata in RAM.
+3. **STT Upload Hardening (Owner: Tools + LLM)**
+   - Remaining: enforce true streaming upload path and remove fallback buffering dependency.
 4. **Config & Secrets (Owner: CLI)**
-   - Surface `set_stt_key` (already exists) in docs + add SECRET.env placeholder for `GROQ_API_KEY`.
-5. **Testing & Verification (Owner: QA)**
-   - Scripted tests that stream mock JPEG/OGA payloads (≤100 KB) through a host-side HTTP server to ensure chunk callbacks never exceed 32 KB and that total transcription latency stays under 10 s.
-   - Manual Telegram validation: send photo → ask "What is this?"; send a voice note → verify transcription reply.
+   - Add examples for Groq profile migration and STT-specific env usage.
+5. **Verification (Owner: QA)**
+   - Keep using live Telegram and monitor-based validation; add scripted stress cases for stack overflow and tool loops.
 
 ## Media Constraints & User Guidance
 - **Photos**: enforce a `file_size` cap (e.g., 1 MB). If Telegram reports a larger file or the stream exceeds chunk limits, abort and reply with a hint to resend via the "Quick way" option so the app auto-resizes/compresses the image.
-- **Voice notes**: check both `duration` and `file_size` (`voice.duration`, `voice.file_size`). Reject anything longer than ~10 seconds or >350 KB with a courteous notice (e.g., "짧은 음성으로 다시 보내 주세요"). Allow per-device overrides via `mimi_secrets.h` or CLI.
+- **Voice notes**: check both `duration` and `file_size` (`voice.duration`, `voice.file_size`). Reject long or oversized notes with `VOICE_LIMIT_NOTICE` and request retry.
 - **LLM image generation**: when the model returns an image URL, simply embed that link in the Telegram reply (Markdown `[보기](URL)` or plain URL). No raw image upload needed.
-- **Runtime tuning**: expose a CLI helper (`set_media_limits <photo_kb> <voice_kb> <voice_secs>`) backed by NVS so operators can relax/tighten limits without rebuilding.
+- **Runtime tuning**: keep `set_media_limits <photo_kb> <voice_kb> <voice_secs>` available for on-device policy changes without rebuild.
 
 ## Memory & Throughput Safeguards
-- Single media worker task drains a queue to avoid concurrent 4 KB TLS buffers multiplying. Each chunk callback logs free PSRAM before processing and aborts if it falls below ~50 KB.
-- Base64 encoder writes directly into a streaming builder (or staged SPIFFS temp file) so raw + encoded payloads are never in memory simultaneously.
-- STT uploader uses chunked transfer: multipart header/footers stay in RAM, while audio bytes stream straight from Telegram into the TLS socket. If `esp_http_client` cannot honor chunking, fall back to a bounded circular buffer flushed via `esp_http_client_write`.
-- Apply backoff + timeout per chunk to prevent stuck downloads, and cap retries to keep the agent loop responsive.
+- Maintain bounded buffers and avoid full in-memory passthrough where possible.
+- Abort early when free PSRAM falls below the watchdog safety threshold.
+- Apply per-request timeout and retry caps to prevent task stalls.
 
 ## User Messaging Patterns
-> Actual implementation must return English strings per existing prompt policy; the lines below are illustrative only.
-- Oversized media → respond with "Please resend the photo using Telegram's quick method so it stays under the device memory limit." (photos) or "I can only process short voice notes (≈10 seconds)." (voice).
+> Actual responses should follow repository locale policy; examples here are English.
+- Oversized media (photo): `"That photo is too large for this device. Please resend it using Telegram's quick option to compress/rescale."`
+- Oversize/invalid voice: `"I can only process short voice notes (about 10 seconds)."`
 - If a request demands high-bandwidth output (e.g., asking for generated images), reply with the URL plus brief instructions that they can open it in their Telegram client.
 
 ## Risk & Mitigation

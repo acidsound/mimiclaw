@@ -15,9 +15,13 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include <stdio.h>
+#include <ctype.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *TAG = "agent";
 static const char *VOICE_LIMIT_NOTICE =
@@ -35,6 +39,24 @@ static const char *PHOTO_LIMIT_NOTICE =
 
 static void send_user_notice(const char *channel, const char *chat_id,
                              const char *text);
+static void sanitize_tool_name_display(const char *in, char *out, size_t out_size);
+static void append_tool_usage_summary(char *summary, size_t summary_size,
+                                     const char *tool_name);
+static uint32_t fnv1a_hash32(const char *s);
+static bool contains_ci_token(const char *haystack, const char *token);
+static bool extract_mac_from_text(const char *text, char *out, size_t out_size);
+static bool is_unknown_or_empty(const char *s);
+static bool contains_ci_token_bounded(const char *haystack, const char *token);
+static bool wol_call_has_selector(const char *input_json);
+static bool infer_wol_selector_from_msg(const char *message, char *selector,
+                                       size_t selector_size);
+static bool infer_wol_tool_input_from_message(const char *message,
+                                             char *out_input,
+                                             size_t out_input_size);
+static bool has_wol_intent_keyword(const char *text);
+static const char *normalize_tool_name_for_exec(const char *input_name,
+                                              char *out_name,
+                                              size_t out_name_size);
 static bool enforce_photo_limit(const mimi_msg_t *msg, size_t file_size);
 static bool enforce_voice_limit(const mimi_msg_t *msg, size_t file_size);
 static esp_err_t base64_chunk_cb(const uint8_t *data, size_t len, void *ctx);
@@ -46,6 +68,42 @@ static char *encode_photo_to_base64(const mimi_msg_t *msg,
 
 #define TOOL_OUTPUT_SIZE (8 * 1024)
 #define STT_FALLBACK_MAX_BYTES (128 * 1024)
+#define MAX_TOOL_SIGNATURES (16)
+
+typedef struct {
+  char name[32];
+  uint32_t input_hash;
+  size_t input_len;
+} tool_signature_t;
+
+typedef struct {
+  tool_signature_t seen[MAX_TOOL_SIGNATURES];
+  int seen_count;
+  bool list_devices_called;
+  bool wol_scan_started;
+  bool wake_on_lan_called;
+  int wol_scan_result_calls;
+  int web_search_calls;
+  int http_request_calls;
+} tool_turn_state_t;
+
+static bool try_fallback_wol_call(const mimi_msg_t *msg, char *tool_output,
+                                 size_t tool_output_size,
+                                 char *tool_usage_summary,
+                                 size_t tool_usage_summary_size,
+                                 tool_turn_state_t *turn_state);
+
+static bool should_execute_tool(const llm_tool_call_t *call,
+                               const char *canonical_name,
+                               const char *tool_input,
+                               tool_turn_state_t *state, char *skip_output,
+                               size_t skip_output_size);
+
+static void init_tool_turn_state(tool_turn_state_t *state) {
+  if (!state)
+    return;
+  memset(state, 0, sizeof(*state));
+}
 
 static void send_user_notice(const char *channel, const char *chat_id,
                              const char *text) {
@@ -58,6 +116,538 @@ static void send_user_notice(const char *channel, const char *chat_id,
   notice.content = strdup(text);
   if (notice.content)
     message_bus_push_outbound(&notice);
+}
+
+static void sanitize_tool_name_display(const char *in, char *out, size_t out_size) {
+  if (!out || out_size == 0)
+    return;
+
+  if (!in) {
+    out[0] = '\0';
+    return;
+  }
+
+  size_t o = 0;
+  for (size_t i = 0; in[i] && o + 1 < out_size; i++) {
+    out[o++] = (in[i] == '_') ? '-' : in[i];
+  }
+  out[o] = '\0';
+}
+
+static void append_tool_usage_summary(char *summary, size_t summary_size,
+                                     const char *tool_name) {
+  if (!summary || !tool_name || summary_size == 0)
+    return;
+
+  char tool_name_safe[32];
+  sanitize_tool_name_display(tool_name, tool_name_safe, sizeof(tool_name_safe));
+  size_t current_len = strlen(summary);
+  size_t entry_len = strlen(tool_name_safe) + 3; // brackets + optional space
+  if (current_len + entry_len + 1 >= summary_size)
+    return;
+
+  if (current_len > 0)
+    strcat(summary, " ");
+  strcat(summary, "[");
+  strcat(summary, tool_name_safe);
+  strcat(summary, "]");
+}
+
+static uint32_t fnv1a_hash32(const char *s) {
+  if (!s)
+    return 2166136261u;
+
+  uint32_t hash = 2166136261u;
+  for (; *s; s++) {
+    hash ^= (uint8_t)*s;
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+static const char *normalize_tool_name_for_exec(const char *input_name,
+                                              char *out_name,
+                                              size_t out_name_size) {
+  if (!input_name || !out_name || out_name_size == 0) {
+    return input_name ? input_name : "";
+  }
+
+  size_t j = 0;
+  bool last_sep = false;
+  for (size_t i = 0; input_name[i] != '\0' && j + 1 < out_name_size; i++) {
+    unsigned char c = (unsigned char)input_name[i];
+
+    if (isalnum(c)) {
+      out_name[j++] = (char)tolower(c);
+      last_sep = false;
+    } else if (c == '_' || c == '-' || c == ' ' || c == '\t' || c == '\n') {
+      if (!last_sep) {
+        out_name[j++] = '_';
+        last_sep = true;
+      }
+    }
+  }
+
+  if (j > 0 && out_name[j - 1] == '_') {
+    out_name[--j] = '\0';
+  } else {
+    out_name[j] = '\0';
+  }
+
+  if (strcmp(out_name, "wakeonlan") == 0) {
+    snprintf(out_name, out_name_size, "wake_on_lan");
+  } else if (strcmp(out_name, "websearch") == 0) {
+    snprintf(out_name, out_name_size, "web_search");
+  } else if (strcmp(out_name, "httprequest") == 0) {
+    snprintf(out_name, out_name_size, "http_request");
+  }
+
+  return out_name;
+}
+
+static bool contains_ci_token(const char *haystack, const char *token) {
+  if (!haystack || !token)
+    return false;
+
+  size_t token_len = strlen(token);
+  if (token_len == 0)
+    return true;
+
+  for (size_t i = 0; haystack[i] != '\0'; i++) {
+    size_t matched = 0;
+    while (matched < token_len && haystack[i + matched] != '\0' &&
+           tolower((unsigned char)haystack[i + matched]) ==
+               tolower((unsigned char)token[matched])) {
+      matched++;
+    }
+    if (matched == token_len) {
+      char before = (i > 0) ? haystack[i - 1] : '\0';
+      char after = haystack[i + token_len];
+
+      const bool before_ok =
+          (i == 0 || !isalnum((unsigned char)before) || before == '_');
+      const bool after_ok =
+          (after == '\0' || !isalnum((unsigned char)after) || after == '_');
+      if (before_ok && after_ok)
+        return true;
+    }
+  }
+
+  return false;
+}
+
+static bool extract_mac_from_text(const char *text, char *out, size_t out_size) {
+  if (!text || !out || out_size < 18)
+    return false;
+
+  for (const char *p = text; *p != '\0'; p++) {
+    unsigned int b0, b1, b2, b3, b4, b5;
+    int consumed = 0;
+
+    if (sscanf(p, "%2x:%2x:%2x:%2x:%2x:%2x%n", &b0, &b1, &b2, &b3, &b4,
+               &b5, &consumed) == 6) {
+      char after = p[consumed];
+      if (after == '\0' || isspace((unsigned char)after) || after == ',' ||
+          after == '.' || after == ')' || after == ']' || after == '}') {
+        snprintf(out, out_size, "%02X:%02X:%02X:%02X:%02X:%02X", b0, b1, b2, b3,
+                 b4, b5);
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+static bool is_unknown_or_empty(const char *s) {
+  return (!s || s[0] == '\0' || strcasecmp(s, "unknown") == 0);
+}
+
+static bool contains_ci_token_bounded(const char *haystack, const char *token) {
+  if (!haystack || !token)
+    return false;
+
+  size_t token_len = strlen(token);
+  if (token_len == 0)
+    return true;
+
+  for (size_t i = 0; haystack[i] != '\0'; i++) {
+    size_t matched = 0;
+    while (matched < token_len && haystack[i + matched] != '\0' &&
+           tolower((unsigned char)haystack[i + matched]) ==
+               tolower((unsigned char)token[matched])) {
+      matched++;
+    }
+    if (matched == token_len) {
+      char before = (i > 0) ? haystack[i - 1] : '\0';
+      char after = haystack[i + token_len];
+
+      const bool before_ok =
+          (i == 0 || isspace((unsigned char)before) || before == '\0' ||
+           before == ',' || before == '.' || before == ')' || before == ']' ||
+           before == '}' || before == '!' || before == ':' || before == ';' ||
+           before == '-' || before == '_' || before == '/' || before == '?');
+      const bool after_ok =
+          (after == '\0' || isspace((unsigned char)after) || after == ',' ||
+           after == '.' || after == ')' || after == ']' || after == '}' ||
+           after == '!' || after == ':' || after == ';' || after == '-' ||
+           after == '_' || after == '/' || after == '?');
+      if (before_ok && after_ok) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+static bool wol_call_has_selector(const char *input_json) {
+  if (!input_json) {
+    return false;
+  }
+
+  cJSON *input = cJSON_Parse(input_json);
+  if (!input || !cJSON_IsObject(input)) {
+    cJSON_Delete(input);
+    return false;
+  }
+
+  const char *fields[] = {"mac", "device", "label", "hostname", "ip", NULL};
+  bool has_selector = false;
+  for (int i = 0; fields[i] && !has_selector; i++) {
+    cJSON *node = cJSON_GetObjectItem(input, fields[i]);
+    if (node && cJSON_IsString(node) &&
+        !is_unknown_or_empty(node->valuestring)) {
+      has_selector = true;
+    }
+  }
+
+  cJSON_Delete(input);
+  return has_selector;
+}
+
+static bool infer_wol_selector_from_msg(const char *message, char *selector,
+                                       size_t selector_size) {
+  if (!message || !selector || selector_size == 0) {
+    return false;
+  }
+
+  char mac[20];
+  if (extract_mac_from_text(message, mac, sizeof(mac))) {
+    snprintf(selector, selector_size, "%s", mac);
+    return true;
+  }
+
+  FILE *f = fopen(MIMI_WOL_DEVICES_FILE, "r");
+  if (!f) {
+    return false;
+  }
+
+  fseek(f, 0, SEEK_END);
+  long file_size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (file_size <= 0) {
+    fclose(f);
+    return false;
+  }
+
+  char *buf = malloc((size_t)file_size + 1);
+  if (!buf) {
+    fclose(f);
+    return false;
+  }
+
+  if (fread(buf, 1, (size_t)file_size, f) != (size_t)file_size) {
+    free(buf);
+    fclose(f);
+    return false;
+  }
+  buf[file_size] = '\0';
+  fclose(f);
+
+  cJSON *root = cJSON_Parse(buf);
+  free(buf);
+  if (!root || !cJSON_IsArray(root)) {
+    cJSON_Delete(root);
+    return false;
+  }
+
+  char matched_selector[64] = {0};
+  size_t match_count = 0;
+  cJSON *item;
+  cJSON_ArrayForEach(item, root) {
+    if (!cJSON_IsObject(item)) {
+      continue;
+    }
+
+    const char *fields[] = {"label", "name", "hostname", "ip", NULL};
+    for (int i = 0; fields[i]; i++) {
+      cJSON *node = cJSON_GetObjectItem(item, fields[i]);
+      if (!node || !cJSON_IsString(node) ||
+          is_unknown_or_empty(node->valuestring)) {
+        continue;
+      }
+      if (contains_ci_token_bounded(message, node->valuestring)) {
+        if (match_count == 0) {
+          snprintf(matched_selector, sizeof(matched_selector), "%s",
+                   node->valuestring);
+        }
+        match_count++;
+        break;
+      }
+    }
+  }
+
+  cJSON_Delete(root);
+  if (match_count == 1) {
+    snprintf(selector, selector_size, "%s", matched_selector);
+    return true;
+  }
+
+  return false;
+}
+
+static bool infer_wol_tool_input_from_message(const char *message, char *out_input,
+                                             size_t out_input_size) {
+  if (!message || !out_input || out_input_size == 0)
+    return false;
+
+  char selector[64];
+  if (!infer_wol_selector_from_msg(message, selector, sizeof(selector))) {
+    return false;
+  }
+
+  cJSON *input = cJSON_CreateObject();
+  if (!input) {
+    return false;
+  }
+
+  if (strchr(selector, ':')) {
+    cJSON_AddStringToObject(input, "mac", selector);
+  } else {
+    cJSON_AddStringToObject(input, "device", selector);
+  }
+
+  char *json = cJSON_PrintUnformatted(input);
+  cJSON_Delete(input);
+  if (!json) {
+    return false;
+  }
+
+  snprintf(out_input, out_input_size, "%s", json);
+  free(json);
+  return true;
+}
+
+static bool has_wol_intent_keyword(const char *text) {
+  return contains_ci_token(text, "wol") ||
+         contains_ci_token(text, "wake-on-lan") ||
+         contains_ci_token(text, "wake on lan") ||
+         contains_ci_token(text, "wake") ||
+         contains_ci_token(text, "turn on") ||
+         contains_ci_token(text, "power on") ||
+         contains_ci_token(text, "mac") ||
+         contains_ci_token(text, "computer") ||
+         contains_ci_token(text, "pc");
+}
+
+static bool try_fallback_wol_call(const mimi_msg_t *msg, char *tool_output,
+                                 size_t tool_output_size,
+                                 char *tool_usage_summary,
+                                 size_t tool_usage_summary_size,
+                                 tool_turn_state_t *turn_state) {
+  if (!msg || !tool_output || tool_output_size == 0 || !msg->content)
+    return false;
+
+  if (!has_wol_intent_keyword(msg->content))
+    return false;
+
+  char mac[20];
+  if (!extract_mac_from_text(msg->content, mac, sizeof(mac)))
+    return false;
+
+  cJSON *input = cJSON_CreateObject();
+  if (!input) {
+    snprintf(tool_output, tool_output_size,
+             "Error: failed to build fallback WOL input.");
+    return true;
+  }
+
+  cJSON_AddStringToObject(input, "mac", mac);
+  char *input_json = cJSON_PrintUnformatted(input);
+  cJSON_Delete(input);
+  if (!input_json) {
+    snprintf(tool_output, tool_output_size, "Error: failed to build WOL input.");
+    return true;
+  }
+
+  tool_output[0] = '\0';
+
+  const char *tool_name = "wake_on_lan";
+  llm_tool_call_t synthetic = {0};
+  strncpy(synthetic.name, tool_name, sizeof(synthetic.name) - 1);
+  synthetic.input = input_json;
+  synthetic.input_len = strlen(input_json);
+
+  char skip_output[128];
+  bool execute =
+      should_execute_tool(&synthetic, tool_name, synthetic.input, turn_state,
+                         skip_output, sizeof(skip_output));
+  if (execute) {
+    tool_registry_execute(tool_name, synthetic.input, tool_output,
+                         tool_output_size);
+    append_tool_usage_summary(tool_usage_summary, tool_usage_summary_size,
+                             tool_name);
+  } else if (skip_output[0] != '\0') {
+    snprintf(tool_output, tool_output_size, "%s", skip_output);
+  }
+
+  free(input_json);
+
+  if (tool_output[0] == '\0') {
+    snprintf(tool_output, tool_output_size,
+             "I found a WOL request but could not execute it from this request.");
+  }
+
+  ESP_LOGI(TAG, "Fallback tool attempt: %s -> %s", tool_name, tool_output);
+  return true;
+}
+
+static bool should_execute_tool(const llm_tool_call_t *call,
+                               const char *canonical_name,
+                               const char *tool_input,
+                               tool_turn_state_t *state, char *skip_output,
+                               size_t skip_output_size) {
+  if (!call || call->name[0] == '\0') {
+    if (skip_output && skip_output_size > 0) {
+      snprintf(skip_output, skip_output_size,
+               "Error: tool call missing name");
+    }
+    return false;
+  }
+
+  if (!state) {
+    if (skip_output && skip_output_size > 0) {
+      snprintf(skip_output, skip_output_size, "Error: internal tool execution state");
+    }
+    return false;
+  }
+
+  const char *input = tool_input ? tool_input : (call->input ? call->input : "{}");
+  const char *name = canonical_name ? canonical_name : call->name;
+  uint32_t in_hash = fnv1a_hash32(input);
+  size_t in_len = strlen(input);
+  const bool is_web_search = (strcmp(name, "web_search") == 0);
+  const bool is_http_request = (strcmp(name, "http_request") == 0);
+
+  for (int i = 0; i < state->seen_count; i++) {
+    const tool_signature_t *sig = &state->seen[i];
+    if (strncmp(sig->name, name, sizeof(sig->name)) == 0) {
+      if ((is_web_search || is_http_request) && sig->input_len == in_len &&
+          sig->input_hash == in_hash) {
+        if (skip_output && skip_output_size > 0) {
+          snprintf(skip_output, skip_output_size,
+                   "Skipped duplicate tool call: %s (same name/input in same turn)",
+                   name);
+        }
+        return false;
+      }
+
+      if (skip_output && skip_output_size > 0) {
+        snprintf(skip_output, skip_output_size,
+                 "Skipped duplicate tool call: %s (already called in this turn)",
+                 name);
+      }
+      return false;
+    }
+  }
+
+  if (is_web_search && state->web_search_calls >= 1) {
+    if (skip_output && skip_output_size > 0) {
+      snprintf(skip_output, skip_output_size,
+               "Skipped duplicate tool call: web_search already used once this "
+               "turn");
+    }
+    return false;
+  }
+
+  if (is_http_request && state->http_request_calls >= 1) {
+    if (skip_output && skip_output_size > 0) {
+      snprintf(skip_output, skip_output_size,
+               "Skipped duplicate tool call: http_request already used once this "
+               "turn");
+    }
+    return false;
+  }
+
+  if (strcmp(name, "list_devices") == 0) {
+    if (state->list_devices_called) {
+      if (skip_output && skip_output_size > 0) {
+        snprintf(skip_output, skip_output_size,
+                 "Skipped duplicate tool call: list_devices already called in this "
+                 "turn");
+      }
+      return false;
+    }
+    state->list_devices_called = true;
+  } else if (strcmp(name, "wol_scan_start") == 0) {
+    if (state->wol_scan_started) {
+      if (skip_output && skip_output_size > 0) {
+        snprintf(skip_output, skip_output_size,
+                 "Skipped duplicate tool call: wol_scan_start already called in "
+                 "this turn");
+      }
+      return false;
+    }
+    state->wol_scan_started = true;
+  } else if (strcmp(name, "wol_scan_result") == 0) {
+    if (!state->wol_scan_started) {
+      if (skip_output && skip_output_size > 0) {
+        snprintf(skip_output, skip_output_size,
+                 "Skipped tool call: wol_scan_result requires wol_scan_start "
+                 "first");
+      }
+      return false;
+    }
+    if (state->wol_scan_result_calls >= 1) {
+      if (skip_output && skip_output_size > 0) {
+        snprintf(skip_output, skip_output_size,
+                 "Skipped tool call: wol_scan_result already requested in this turn");
+      }
+      return false;
+    }
+    state->wol_scan_result_calls++;
+  } else if (strcmp(name, "wake_on_lan") == 0) {
+    if (state->wake_on_lan_called) {
+      if (skip_output && skip_output_size > 0) {
+        snprintf(skip_output, skip_output_size,
+                 "Skipped duplicate tool call: wake_on_lan already attempted in "
+                 "this turn");
+      }
+      return false;
+    }
+    state->wake_on_lan_called = true;
+  }
+
+  if (state->seen_count < MAX_TOOL_SIGNATURES) {
+    tool_signature_t *sig = &state->seen[state->seen_count++];
+    strncpy(sig->name, name, sizeof(sig->name) - 1);
+    sig->name[sizeof(sig->name) - 1] = '\0';
+    sig->input_hash = in_hash;
+    sig->input_len = in_len;
+  }
+
+  if (skip_output && skip_output_size > 0) {
+    skip_output[0] = '\0';
+  }
+
+  if (is_web_search) {
+    state->web_search_calls++;
+  } else if (is_http_request) {
+    state->http_request_calls++;
+  }
+
+  return true;
 }
 
 static bool enforce_photo_limit(const mimi_msg_t *msg, size_t file_size) {
@@ -260,24 +850,55 @@ static cJSON *build_assistant_content(const llm_response_t *resp) {
 }
 
 /* Build the user message with tool_result blocks */
-static cJSON *build_tool_results(const llm_response_t *resp, char *tool_output,
-                                 size_t tool_output_size, bool *web_no_result,
+static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *msg,
+                                 char *tool_output, size_t tool_output_size,
+                                 bool *web_no_result,
                                  char *web_no_result_output,
-                                 size_t web_no_result_output_size) {
+                                 size_t web_no_result_output_size,
+                                 char *tool_usage_summary,
+                                 size_t tool_usage_summary_size,
+                                 tool_turn_state_t *tool_state) {
   cJSON *content = cJSON_CreateArray();
 
   for (int i = 0; i < resp->call_count; i++) {
     const llm_tool_call_t *call = &resp->calls[i];
+    char canonical_name[32] = {0};
+    const char *tool_name =
+        normalize_tool_name_for_exec(call->name, canonical_name,
+                                    sizeof(canonical_name));
+
+    const char *raw_input =
+        call->input ? call->input : "{}";
+    const char *tool_input = raw_input;
+    char inferred_input[192];
+    if (strcmp(tool_name, "wake_on_lan") == 0 &&
+        !wol_call_has_selector(raw_input)) {
+      if (infer_wol_tool_input_from_message(msg ? msg->content : NULL,
+                                           inferred_input,
+                                           sizeof(inferred_input))) {
+        tool_input = inferred_input;
+      } else if (msg && msg->content) {
+        ESP_LOGW(TAG, "WOL call missing selector and no selector inferred from msg: %s",
+                 msg->content);
+      }
+    }
 
     /* Execute tool */
     tool_output[0] = '\0';
-    tool_registry_execute(call->name, call->input, tool_output,
-                          tool_output_size);
+    bool execute =
+        should_execute_tool(call, tool_name, tool_input, tool_state, tool_output,
+                           tool_output_size);
+    if (execute) {
+      tool_registry_execute(tool_name, tool_input, tool_output,
+                            tool_output_size);
+      append_tool_usage_summary(tool_usage_summary, tool_usage_summary_size,
+                               tool_name);
+    }
 
-    ESP_LOGI(TAG, "Tool %s result: %d bytes", call->name,
+    ESP_LOGI(TAG, "Tool %s result: %d bytes", tool_name,
              (int)strlen(tool_output));
 
-    if (web_no_result && strcmp(call->name, "web_search") == 0 &&
+    if (web_no_result && strcmp(tool_name, "web_search") == 0 &&
         strncmp(tool_output, "No web results found for \"", 25) == 0) {
       *web_no_result = true;
       if (web_no_result_output && web_no_result_output_size > 0) {
@@ -464,6 +1085,8 @@ static void agent_loop_task(void *arg) {
     char tool_usage_summary[256] = {0};
     llm_response_t resp;
     memset(&resp, 0, sizeof(resp));
+    tool_turn_state_t turn_state;
+    init_tool_turn_state(&turn_state);
 
     while (iteration < MIMI_AGENT_MAX_TOOL_ITER) {
       /* Send "working" indicator before each API call */
@@ -494,6 +1117,15 @@ static void agent_loop_task(void *arg) {
       }
 
       if (!resp.tool_use) {
+        if (iteration == 0 &&
+            try_fallback_wol_call(&msg, tool_output, TOOL_OUTPUT_SIZE,
+                                  tool_usage_summary,
+                                  sizeof(tool_usage_summary), &turn_state)) {
+          final_text = strdup(tool_output);
+          llm_response_free(&resp);
+          break;
+        }
+
         /* Normal completion — save final text and break */
         if (resp.text && resp.text_len > 0) {
           final_text = strdup(resp.text);
@@ -502,21 +1134,16 @@ static void agent_loop_task(void *arg) {
         break;
       }
 
+      if (resp.call_count == 0) {
+        ESP_LOGW(TAG, "LLM requested tool use but returned no valid calls");
+        final_text = strdup("No valid tool calls were returned by the model.");
+        llm_response_free(&resp);
+        iteration = MIMI_AGENT_MAX_TOOL_ITER;
+        break;
+      }
+
       ESP_LOGI(TAG, "Tool use iteration %d: %d calls", iteration + 1,
                resp.call_count);
-
-      /* Accumulate tool names for summary */
-      for (int i = 0; i < resp.call_count; i++) {
-        size_t current_len = strlen(tool_usage_summary);
-        size_t name_len = strlen(resp.calls[i].name) + 4; // "[] " + null
-        if (current_len + name_len < sizeof(tool_usage_summary)) {
-          if (current_len > 0)
-            strcat(tool_usage_summary, " ");
-          strcat(tool_usage_summary, "[");
-          strcat(tool_usage_summary, resp.calls[i].name);
-          strcat(tool_usage_summary, "]");
-        }
-      }
 
       /* Append assistant message with content array */
       cJSON *asst_msg = cJSON_CreateObject();
@@ -531,9 +1158,10 @@ static void agent_loop_task(void *arg) {
         web_no_result_output[0] = '\0';
       }
       cJSON *tool_results =
-          build_tool_results(&resp, tool_output, TOOL_OUTPUT_SIZE,
+          build_tool_results(&resp, &msg, tool_output, TOOL_OUTPUT_SIZE,
                             &web_search_no_result, web_no_result_output,
-                            TOOL_OUTPUT_SIZE);
+                            TOOL_OUTPUT_SIZE, tool_usage_summary,
+                            sizeof(tool_usage_summary), &turn_state);
 
       // Log tool results
       char *res_str = cJSON_PrintUnformatted(tool_results);

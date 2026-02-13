@@ -12,16 +12,40 @@
 static const char *TAG = "tool_files";
 
 #define MAX_FILE_SIZE (32 * 1024)
+#define MAX_TOOL_FILE_PATH 128
 
 /**
- * Validate that a path starts with /spiffs/ and contains no ".." traversal.
+ * Normalize user-provided paths to stable internal locations.
+ */
+static bool normalize_file_path(const char *path, char *out, size_t out_size) {
+  if (!path || !out || out_size == 0)
+    return false;
+
+  if (snprintf(out, out_size, "%s", path) >= (int)out_size)
+    return false;
+
+  /* Backward-compatible alias: keep users out of trouble if they use the old
+   * path without /private */
+  if (strcmp(out, "/spiffs/wol_devices.json") == 0) {
+    snprintf(out, out_size, MIMI_WOL_DEVICES_FILE);
+    return true;
+  }
+
+  return true;
+}
+
+/**
+ * Validate that a path is allowed:
+ *  - /spiffs/public/... for general SPIFFS files
+ *  - /spiffs/private/wol_devices.json as an exception for WOL registration
+ * and contains no ".." traversal.
  */
 static bool validate_path(const char *path) {
   if (!path)
     return false;
-  /* Only allow access to the public directory */
-  if (strncmp(path, MIMI_SPIFFS_PUBLIC_DIR, strlen(MIMI_SPIFFS_PUBLIC_DIR)) !=
-      0) {
+  if (strncmp(path, MIMI_SPIFFS_PUBLIC_DIR,
+              strlen(MIMI_SPIFFS_PUBLIC_DIR)) != 0 &&
+      strcmp(path, MIMI_WOL_DEVICES_FILE) != 0) {
     return false;
   }
   if (strstr(path, "..") != NULL)
@@ -39,11 +63,13 @@ esp_err_t tool_read_file_execute(const char *input_json, char *output,
     return ESP_ERR_INVALID_ARG;
   }
 
-  const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
-  if (!validate_path(path)) {
+  const char *raw_path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
+  char path[MAX_TOOL_FILE_PATH];
+  if (!normalize_file_path(raw_path, path, sizeof(path)) ||
+      !validate_path(path)) {
     snprintf(output, output_size,
              "Error: path must start with /spiffs/public/ and must not contain "
-             "'..'");
+             "'..' (except wol_devices can be /spiffs/private/wol_devices.json)");
     cJSON_Delete(root);
     return ESP_ERR_INVALID_ARG;
   }
@@ -78,14 +104,16 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output,
     return ESP_ERR_INVALID_ARG;
   }
 
-  const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
+  const char *raw_path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
   const char *content =
       cJSON_GetStringValue(cJSON_GetObjectItem(root, "content"));
 
-  if (!validate_path(path)) {
+  char path[MAX_TOOL_FILE_PATH];
+  if (!normalize_file_path(raw_path, path, sizeof(path)) ||
+      !validate_path(path)) {
     snprintf(output, output_size,
              "Error: path must start with /spiffs/public/ and must not contain "
-             "'..'");
+             "'..' (except wol_devices can be /spiffs/private/wol_devices.json)");
     cJSON_Delete(root);
     return ESP_ERR_INVALID_ARG;
   }
@@ -130,16 +158,18 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output,
     return ESP_ERR_INVALID_ARG;
   }
 
-  const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
+  const char *raw_path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
   const char *old_str =
       cJSON_GetStringValue(cJSON_GetObjectItem(root, "old_string"));
   const char *new_str =
       cJSON_GetStringValue(cJSON_GetObjectItem(root, "new_string"));
 
-  if (!validate_path(path)) {
+  char path[MAX_TOOL_FILE_PATH];
+  if (!normalize_file_path(raw_path, path, sizeof(path)) ||
+      !validate_path(path)) {
     snprintf(output, output_size,
              "Error: path must start with /spiffs/public/ and must not contain "
-             "'..'");
+             "'..' (except wol_devices can be /spiffs/private/wol_devices.json)");
     cJSON_Delete(root);
     return ESP_ERR_INVALID_ARG;
   }

@@ -169,6 +169,7 @@ MimiClaw는 데이터 보호를 위해 엄격한 **디렉토리 기반 격리** 
 | `USER.md` | Public | 사용자 정보 — 이름, 선호도, 언어 설정 등. |
 | `MEMORY.md` | Public | 장기 기억 — 봇이 항상 기억해야 할 내용들. |
 | `SESSIONS.json` | Private | 지속적인 HTTP 세션 쿠키 정보. |
+| `wol_devices.json` | Private | WOL 장치 등록 정보 (`label`,`name`,`ip`,`hostname`,`mac`). |
 | `SECRET.env` | Private | `http_request` 도구에서 사용할 외부 API 키들. |
 | `tg_12345.jsonl` | Private | 채팅 기록 — 사용자와의 대화 내역. |
 
@@ -180,8 +181,9 @@ MimiClaw는 Anthropic의 도구 사용 프로토콜(ReAct 패턴)을 사용합�
 |--------|------|
 | `web_search` | Brave Search API를 통해 웹에서 최신 정보를 검색합니다. |
 | `http_request` | **(보안)** SSRF 방지 및 비밀값 치환 기능이 포함된 GET/POST 요청. |
-| `wake_on_lan` | 홈 랩의 기기를 깨우기 위한 Magic Packet을 전송합니다. |
-| `list_devices` | 배경에서 ICMP 서브넷 스캔을 통해 찾은 기기 목록을 보여줍니다. |
+| `wake_on_lan` | 홈 랩의 기기를 깨우기 위한 Magic Packet을 전송합니다. `list_devices` 결과의 label/hostname/ip으로도 대상 지정 가능. |
+| `wol_register` | `mac`을 기준으로 WOL 장비를 등록/갱신하고 라벨·이름·IP/호스트를 보강합니다. |
+| `list_devices` | 배경에서 ICMP 서브넷 스캔을 통해 찾은 기기 목록(label/ip/mac/hostname)을 보여줍니다. |
 | `get_current_time` | HTTP를 통해 현재 날짜/시간을 가져오고 시스템 시계를 설정합니다. |
 
 ### 보안 HTTP 도구
