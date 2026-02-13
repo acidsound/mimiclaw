@@ -10,6 +10,7 @@
 > [!IMPORTANT]
 > **v0.2.0 新功能：**
 > - 支持 **Kimi (Moonshot AI)** 和 **OpenAI 兼容** 的提供商！
+> - **新增 Telegram 多媒体支持：** 语音消息自动转写 STT，图片消息支持 vision 输入。
 > - **LLM 驱动调度器 (NEW!):** 在 Telegram 上说“3 分钟后提醒我”，Mimi 会自动管理 `/spiffs/public/schedule.md` 来触发闹钟。
 > - **实时时间注入:** 通过将当前系统时间（KST）直接注入 LLM 上下文，增强了时间感知能力。
 
@@ -43,6 +44,7 @@ MimiClaw 把一块小小的 ESP32-S3 开发板变成你的私人 AI 助理。插
 - 一根 **USB Type-C 数据线**
 - 一个 **Telegram Bot Token** — 在 Telegram 找 [@BotFather](https://t.me/BotFather) 创建
 - 一个 **Anthropic API Key** (Claude) 或 **Moonshot API Key** (Kimi)
+- 一个可选的 **STT API Key**（用于语音消息，例如 Groq）
 
 ### 安装
 
@@ -82,6 +84,12 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 #define MIMI_SECRET_SEARCH_KEY      ""              // 可选：Brave Search API key
 #define MIMI_SECRET_PROXY_HOST      ""              // 可选：代理地址
 #define MIMI_SECRET_PROXY_PORT      ""              // 可选：代理端口
+
+/* STT (Groq/Whisper) */
+#define MIMI_SECRET_STT_PROVIDER    MIMI_STT_PROVIDER_GROQ
+#define MIMI_SECRET_STT_KEY         ""
+#define MIMI_SECRET_STT_BASE_URL    "https://api.groq.com/openai/v1"
+#define MIMI_SECRET_STT_MODEL       "whisper-large-v3"
 ```
 
 然后编译烧录：
@@ -133,6 +141,11 @@ mimi> set_model moonshot-v1-8k     # 设置 Kimi 模型
 mimi> set_proxy 192.168.1.83 7897  # 设置代理
 mimi> clear_proxy                  # 清除代理
 mimi> set_search_key BSA...        # 设置 Brave Search API Key
+mimi> set_stt_provider groq         # 设置 STT 提供商（当前支持: groq）
+mimi> set_stt_base_url https://api.groq.com/openai/v1
+mimi> set_stt_key gsk_...           # 设置 STT API Key
+mimi> set_stt_model whisper-large-v3
+mimi> set_media_limits 1024 400 10   # 图片KB/语音KB/秒数
 mimi> config_show                  # 查看所有配置（脱敏显示）
 mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 ```
@@ -174,6 +187,14 @@ MimiClaw 使用 Anthropic 的 tool use 协议 — Claude 在对话中可以调�
 | `get_current_time` | 通过 HTTP 获取当前日期和时间，并设置系统时钟 |
 
 启用网页搜索需要在 `mimi_secrets.h` 中设置 [Brave Search API key](https://brave.com/search/api/)（`MIMI_SECRET_SEARCH_KEY`）。
+
+## Telegram 多媒体处理
+
+- **语音转写（STT）**：Telegram 语音消息会流式提交到 STT（默认 Groq + Whisper），转写完成后加入会话上下文。
+  - 默认限制：图片 1 MB、语音 400 KB、语音 10 秒。可通过 `set_media_limits` 调整。
+- **图片输入（Vision）**：Telegram 图片会以流式下载，并以 image block 形式提供给模型。
+- **失败与保护**：超限或转写失败时返回清晰提示文本，不触发任务崩溃。
+- **展示安全**：`[web_search]` 같은标签现在会在 Telegram 渲染中安全显示，不会被误当作 Markdown 解析。
 
 ## 其他功能
 

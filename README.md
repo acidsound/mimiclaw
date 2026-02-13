@@ -10,6 +10,7 @@
 > [!IMPORTANT]
 > **v0.2.0 신규 기능:**
 > - **Kimi (Moonshot AI)** 및 **OpenAI 호환** 서비스 지원!
+> - **텔레그램 미디어 처리:** 음성 메시지 실시간 STT 처리 및 사진 메시지 vision 입력 지원
 > - **LLM 기반 스케줄러 (NEW!):** 텔레그램으로 "3분 뒤에 알려줘"라고 말하면 자동으로 `/spiffs/public/schedule.md`를 관리하여 알림을 줍니다.
 > - **동적 시간 주입:** LLM이 현재 시각(KST)을 항상 정확히 인지하도록 실시간 시간 주입 기능이 추가되었습니다.
 > - **오류 복구 강화:** Gemini 등 특정 모델이 반환하는 비표준 도구 호출 에러(배열 형태 등)에 대한 예외 처리를 강화하여 안정적인 중단 및 복구가 가능합니다.
@@ -44,6 +45,7 @@ MimiClaw는 작은 ESP32-S3 보드를 개인용 AI 어시스턴트로 바꿔줍�
 - **USB Type-C 케이블**
 - **텔레그램 봇 토큰** — 텔레그램 [@BotFather](https://t.me/BotFather)를 통해 생성 가능
 - **Anthropic API Key** (Claude) 또는 **Moonshot API Key** (Kimi)
+- **(선택) STT API Key** — 음성 노트를 사용하는 경우 (예: Groq)
 
 ### 설치
 
@@ -82,6 +84,12 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 #define MIMI_SECRET_SEARCH_KEY      ""              // 선택사항: Brave Search API 키
 #define MIMI_SECRET_PROXY_HOST      ""              // 선택사항: 예) "10.0.0.1"
 #define MIMI_SECRET_PROXY_PORT      ""              // 선택사항: 예) "7897"
+
+/* STT (Groq/Whisper) */
+#define MIMI_SECRET_STT_PROVIDER    MIMI_STT_PROVIDER_GROQ
+#define MIMI_SECRET_STT_KEY         ""
+#define MIMI_SECRET_STT_BASE_URL    "https://api.groq.com/openai/v1"
+#define MIMI_SECRET_STT_MODEL       "whisper-large-v3"
 ```
 
 빌드 및 플래싱:
@@ -118,6 +126,11 @@ mimi> set_model moonshot-v1-8k     # Kimi 모델 설정
 mimi> set_proxy 127.0.0.1 7897     # HTTP 프록시 설정
 mimi> clear_proxy                  # 프록시 제거
 mimi> set_search_key BSA...        # Brave Search API 키 설정
+mimi> set_stt_provider groq        # STT 제공자 설정 (현재 지원: groq)
+mimi> set_stt_base_url https://api.groq.com/openai/v1
+mimi> set_stt_key gsk_...         # STT API 키 설정
+mimi> set_stt_model whisper-large-v3
+mimi> set_media_limits 1024 400 10 # 기본 제약(사진KB/음성KB/초)
 mimi> tg_auth_add 12345            # 텔레그램 사용자 권한 부여 (chat_id)
 mimi> tg_auth_remove 12345         # 권한 제거
 mimi> tg_auth_list                 # 권한 부여된 목록 확인
@@ -179,6 +192,14 @@ MimiClaw는 Anthropic의 도구 사용 프로토콜(ReAct 패턴)을 사용합�
 - **8KB 제한**: 대용량 응답으로 인한 메모리 고갈을 방지합니다.
 
 Brave Search 웹 검색을 활성화하려면 `mimi_secrets.h`에서 `MIMI_SECRET_SEARCH_KEY`로 [Brave Search API 키](https://brave.com/search/api/)를 설정하세요.
+
+## 텔레그램 미디어 처리
+
+- **음성 메모(STT)**: Telegram 음성 메시지는 `streaming` 방식으로 수신되어 Groq Whisper(기본)로 STT 변환 후 텍스트로 LLM에 전달됩니다.
+  - 기본 제한: 사진 1 MB, 음성 400 KB, 음성 10초 (변경 필요 시 `set_media_limits`)
+- **사진 처리(Vision)**: Telegram `photo`를 받아 스트리밍으로 다운로드하고 base64 이미지 블록으로 변환한 뒤 LLM vision 입력으로 전달합니다.
+- **안전 정책**: 용량 초과 또는 인식 실패 시 사용자에게 명확한 안내 문구를 반환합니다.
+- **검색 툴 UX 개선**: 검색 결과가 0건일 때 `[ ]` 마크다운 토큰이 텔레그램 이탤릭 규칙에 의해 훼손되지 않도록 메시지 렌더링을 보완했습니다.
 
 ## 추가 포함 기능
 

@@ -10,6 +10,7 @@
 > [!IMPORTANT]
 > **New in v0.2.0:**
 > - Support for **Kimi (Moonshot AI)** and **OpenAI-compatible** providers!
+> - **Telegram media support:** voice notes can be transcribed via STT and photos can be passed to vision flow.
 > - **LLM-Powered Scheduler (NEW!):** Simply say "Remind me in 3 minutes" on Telegram, and Mimi will automatically manage `/spiffs/public/schedule.md` to trigger alarms.
 > - **Real-time Time Injection:** Enhanced time awareness by injecting the current system time (KST) directly into the LLM context.
 > - **Robust Error Recovery:** Added specialized handling for non-standard tool-calling errors (e.g., Gemini's array-wrapped errors) to ensure stable agent turn recovery.
@@ -44,6 +45,7 @@ You send a message on Telegram. The ESP32-S3 picks it up over WiFi, feeds it int
 - A **USB Type-C cable**
 - A **Telegram bot token** — talk to [@BotFather](https://t.me/BotFather) on Telegram to create one
 - An **Anthropic API key** (Claude) OR **Moonshot API key** (Kimi)
+- An optional **STT API key** for voice notes (e.g., Groq)
 
 ### Install
 
@@ -82,6 +84,12 @@ Edit `main/mimi_secrets.h`:
 #define MIMI_SECRET_SEARCH_KEY      ""              // optional: Brave Search API key
 #define MIMI_SECRET_PROXY_HOST      ""              // optional: e.g. "10.0.0.1"
 #define MIMI_SECRET_PROXY_PORT      ""              // optional: e.g. "7897"
+
+/* STT (Groq/Whisper) */
+#define MIMI_SECRET_STT_PROVIDER    MIMI_STT_PROVIDER_GROQ
+#define MIMI_SECRET_STT_KEY         ""
+#define MIMI_SECRET_STT_BASE_URL    "https://api.groq.com/openai/v1"
+#define MIMI_SECRET_STT_MODEL       "whisper-large-v3"
 ```
 
 Then build and flash:
@@ -118,6 +126,11 @@ mimi> set_model moonshot-v1-8k     # set Kimi model
 mimi> set_proxy 127.0.0.1 7897     # set HTTP proxy
 mimi> clear_proxy                  # remove proxy
 mimi> set_search_key BSA...        # set Brave Search API key
+mimi> set_stt_provider groq        # set STT provider (currently: groq)
+mimi> set_stt_base_url https://api.groq.com/openai/v1
+mimi> set_stt_key gsk_...         # set STT API key
+mimi> set_stt_model whisper-large-v3
+mimi> set_media_limits 1024 400 10 # photo KB / voice KB / max seconds
 mimi> tg_auth_add 12345            # authorize a Telegram user (chat_id)
 mimi> tg_auth_remove 12345         # deauthorize a user
 mimi> tg_auth_list                 # list authorized users
@@ -179,6 +192,14 @@ The `http_request` tool is hardened for security:
 - **8KB Limit**: Prevents memory exhaustion on large responses.
 
 To enable web search, set a [Brave Search API key](https://brave.com/search/api/) via `MIMI_SECRET_SEARCH_KEY` in `mimi_secrets.h`.
+
+## Telegram media handling
+
+- **Voice notes (STT):** Telegram voice messages are streamed and transcribed before being sent to the LLM.
+  - Default limits: photo 1 MB, voice 400 KB, max 10 seconds. Use `set_media_limits` to change.
+- **Photo input (Vision):** Telegram photos are downloaded by stream and included as image blocks for model input.
+- **Safety behavior:** If STT fails or limits are exceeded, the bot responds with a short helpful message instead of crashing.
+- **Render safety:** Search tags like `[web_search]` are handled safely in Telegram output rendering.
 
 ## Also Included
 
