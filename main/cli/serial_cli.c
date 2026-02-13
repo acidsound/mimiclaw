@@ -1,5 +1,7 @@
 #include "serial_cli.h"
 #include "llm/llm_proxy.h"
+#include "llm/llm_stt.h"
+#include "media/media_limits.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
 #include "mimi_config.h"
@@ -197,7 +199,110 @@ static int cmd_set_proxy(int argc, char **argv) {
   return 0;
 }
 
-/* --- clear_proxy command --- */
+/* --- set_stt_key command --- */
+static struct {
+  struct arg_str *key;
+  struct arg_end *end;
+} stt_key_args;
+
+static int cmd_set_stt_key(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&stt_key_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, stt_key_args.end, argv[0]);
+    return 1;
+  }
+  llm_stt_set_key(stt_key_args.key->sval[0]);
+  printf("STT key saved.\n");
+  return 0;
+}
+
+/* --- set_stt_model command --- */
+static struct {
+  struct arg_str *model;
+  struct arg_end *end;
+} stt_model_args;
+
+static int cmd_set_stt_model(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&stt_model_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, stt_model_args.end, argv[0]);
+    return 1;
+  }
+  llm_stt_set_model(stt_model_args.model->sval[0]);
+  printf("STT model saved.\n");
+  return 0;
+}
+
+/* --- set_stt_base_url command --- */
+static struct {
+  struct arg_str *url;
+  struct arg_end *end;
+} stt_base_url_args;
+
+static int cmd_set_stt_base_url(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&stt_base_url_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, stt_base_url_args.end, argv[0]);
+    return 1;
+  }
+  llm_stt_set_base_url(stt_base_url_args.url->sval[0]);
+  printf("STT base URL saved.\n");
+  return 0;
+}
+
+/* --- set_stt_provider command --- */
+static struct {
+  struct arg_str *provider;
+  struct arg_end *end;
+} stt_provider_args;
+
+static int cmd_set_stt_provider(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&stt_provider_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, stt_provider_args.end, argv[0]);
+    return 1;
+  }
+  const char *val = stt_provider_args.provider->sval[0];
+  int p = -1;
+  if (strcasecmp(val, "groq") == 0 || strcasecmp(val, "g") == 0) {
+    p = MIMI_STT_PROVIDER_GROQ;
+  } else {
+    printf("Invalid provider. Use 'groq'.\n");
+    return 1;
+  }
+  if (llm_stt_set_provider(p) != ESP_OK) {
+    printf("Failed to save STT provider.\n");
+    return 1;
+  }
+  printf("STT provider set to %s (%d).\n", val, p);
+  return 0;
+}
+
+/* --- set_media_limits command --- */
+static struct {
+  struct arg_int *photo_kb;
+  struct arg_int *voice_kb;
+  struct arg_int *voice_secs;
+  struct arg_end *end;
+} media_limit_args;
+
+static int cmd_set_media_limits(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&media_limit_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, media_limit_args.end, argv[0]);
+    return 1;
+  }
+  size_t photo_bytes = (size_t)media_limit_args.photo_kb->ival[0] * 1024;
+  size_t voice_bytes = (size_t)media_limit_args.voice_kb->ival[0] * 1024;
+  int voice_secs = media_limit_args.voice_secs->ival[0];
+  media_limit_set_photo_bytes(photo_bytes);
+  media_limit_set_voice_bytes(voice_bytes);
+  media_limit_set_voice_seconds(voice_secs);
+  printf("Media limits updated: photo=%d KB, voice=%d KB/%d s\n",
+         media_limit_args.photo_kb->ival[0], media_limit_args.voice_kb->ival[0],
+         voice_secs);
+  return 0;
+}
 static int cmd_clear_proxy(int argc, char **argv) {
   http_proxy_clear();
   printf("Proxy cleared. Restart to apply.\n");
@@ -312,6 +417,32 @@ static int cmd_config_show(int argc, char **argv) {
                MIMI_SECRET_BASE_URL, false);
   print_config("Timezone", MIMI_NVS_LLM, MIMI_NVS_KEY_TIMEZONE, MIMI_TIMEZONE,
                false);
+  printf("--- STT Profile ---\n");
+  print_config("STT Key", MIMI_NVS_LLM, MIMI_NVS_KEY_STT_KEY,
+               MIMI_SECRET_STT_KEY, true);
+  print_config("STT Model", MIMI_NVS_LLM, MIMI_NVS_KEY_STT_MODEL,
+               MIMI_SECRET_STT_MODEL, false);
+  print_config("STT Base URL", MIMI_NVS_LLM, MIMI_NVS_KEY_STT_BASE_URL,
+               MIMI_SECRET_STT_BASE_URL, false);
+  char stt_provider_str[16];
+  const char *stt_source = "build";
+  int stt_provider = MIMI_STT_DEFAULT_PROVIDER;
+#ifdef MIMI_SECRET_STT_PROVIDER
+  stt_provider = MIMI_SECRET_STT_PROVIDER;
+#endif
+  if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs) == ESP_OK) {
+    int32_t val;
+    if (nvs_get_i32(nvs, MIMI_NVS_KEY_STT_PROVIDER, &val) == ESP_OK) {
+      stt_provider = (int)val;
+      stt_source = "NVS";
+    }
+    nvs_close(nvs);
+  }
+  snprintf(stt_provider_str, sizeof(stt_provider_str), "%s (%d)",
+           (stt_provider == MIMI_STT_PROVIDER_GROQ) ? "Groq" : "Unknown",
+           stt_provider);
+  printf("  %-14s: %s  [%s]\n", "STT Provider", stt_provider_str,
+         stt_source);
   print_config("Search Key", MIMI_NVS_SEARCH, MIMI_NVS_KEY_API_KEY,
                MIMI_SECRET_SEARCH_KEY, true);
   printf("=============================\n");
@@ -1036,6 +1167,68 @@ esp_err_t serial_cli_init(void) {
       .argtable = &cat_args,
   };
   esp_console_cmd_register(&cat_cmd);
+
+  /* set_stt_key */
+  stt_key_args.key = arg_str1(NULL, NULL, "<key>", "STT API key");
+  stt_key_args.end = arg_end(1);
+  esp_console_cmd_t stt_key_cmd = {
+      .command = "set_stt_key",
+      .help = "Set STT API key",
+      .func = &cmd_set_stt_key,
+      .argtable = &stt_key_args,
+  };
+  esp_console_cmd_register(&stt_key_cmd);
+
+  /* set_stt_model */
+  stt_model_args.model = arg_str1(NULL, NULL, "<model>",
+                                  "STT model for transcriptions");
+  stt_model_args.end = arg_end(1);
+  esp_console_cmd_t stt_model_cmd = {
+      .command = "set_stt_model",
+      .help = "Set STT model (default: " MIMI_STT_DEFAULT_MODEL ")",
+      .func = &cmd_set_stt_model,
+      .argtable = &stt_model_args,
+  };
+  esp_console_cmd_register(&stt_model_cmd);
+
+  /* set_stt_base_url */
+  stt_base_url_args.url =
+      arg_str1(NULL, NULL, "<url>", "STT API base URL or endpoint");
+  stt_base_url_args.end = arg_end(1);
+  esp_console_cmd_t stt_base_url_cmd = {
+      .command = "set_stt_base_url",
+      .help = "Set STT base URL",
+      .func = &cmd_set_stt_base_url,
+      .argtable = &stt_base_url_args,
+  };
+  esp_console_cmd_register(&stt_base_url_cmd);
+
+  /* set_stt_provider */
+  stt_provider_args.provider =
+      arg_str1(NULL, NULL, "<provider>", "groq");
+  stt_provider_args.end = arg_end(1);
+  esp_console_cmd_t stt_provider_cmd = {
+      .command = "set_stt_provider",
+      .help = "Set STT provider",
+      .func = &cmd_set_stt_provider,
+      .argtable = &stt_provider_args,
+  };
+  esp_console_cmd_register(&stt_provider_cmd);
+
+  media_limit_args.photo_kb = arg_int1(NULL, NULL, "<photo_kb>",
+                                       "Max photo size in KB");
+  media_limit_args.voice_kb = arg_int1(NULL, NULL, "<voice_kb>",
+                                       "Max voice size in KB");
+  media_limit_args.voice_secs =
+      arg_int1(NULL, NULL, "<voice_secs>", "Max voice duration in seconds");
+  media_limit_args.end = arg_end(3);
+  esp_console_cmd_t media_limits_cmd = {
+      .command = "set_media_limits",
+      .help = "Set media limits: set_media_limits <photo_kb> <voice_kb> <voice_secs>",
+      .func = &cmd_set_media_limits,
+      .argtable = &media_limit_args,
+  };
+  esp_console_cmd_register(&media_limits_cmd);
 
   return ESP_OK;
 }

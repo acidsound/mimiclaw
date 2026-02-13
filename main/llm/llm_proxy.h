@@ -88,3 +88,11 @@ void llm_response_free(llm_response_t *resp);
  */
 esp_err_t llm_chat_tools(const char *system_prompt, cJSON *messages,
                          const char *tools_json, llm_response_t *resp);
+
+/**
+ * Utility: Base64 encode data (uses PSRAM for output if dst is NULL).
+ * @param src  Source data
+ * @param slen Source length
+ * @return Heap-allocated string (must be freed) or NULL.
+ */
+char *llm_util_base64_encode(const uint8_t *src, size_t slen);

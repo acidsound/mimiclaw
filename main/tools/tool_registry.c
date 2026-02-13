@@ -3,6 +3,7 @@
 #include "tools/tool_get_time.h"
 #include "tools/tool_memory.h"
 #include "tools/tool_system.h"
+#include "tools/tool_stt.h"
 #include "tools/tool_web_search.h"
 
 #include "cJSON.h"
@@ -183,6 +184,18 @@ esp_err_t tool_registry_init(void) {
       .execute = tool_http_request_execute,
   };
   register_tool(&hr);
+
+  mimi_tool_t stt = {
+      .name = "stt_transcribe",
+      .description = "Transcribe a Telegram voice note by providing its "
+                     "file_id. Returns the recognized text.",
+      .input_schema_json =
+          "{\"type\":\"object\",\"properties\":{"
+          "\"file_id\":{\"type\":\"string\",\"description\":\"Telegram "
+          "file_id of the voice note\"}},\"required\":[\"file_id\"]}",
+      .execute = tool_stt_execute,
+  };
+  register_tool(&stt);
 
   /* Register wake_on_lan */
   mimi_tool_t wol = {

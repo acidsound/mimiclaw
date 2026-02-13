@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stddef.h>
 
 /**
  * Initialize the Telegram bot.
@@ -31,3 +32,20 @@ esp_err_t telegram_set_token(const char *token);
 esp_err_t telegram_auth_add(int64_t chat_id);
 esp_err_t telegram_auth_remove(int64_t chat_id);
 void telegram_auth_list(void);
+
+typedef struct {
+  char *path;     /* Heap-allocated; caller frees */
+  size_t size;    /* Bytes reported by Telegram */
+} telegram_file_info_t;
+
+typedef esp_err_t (*telegram_media_chunk_cb_t)(const uint8_t *data, size_t len,
+                                               void *ctx);
+
+esp_err_t telegram_get_file_info(const char *file_id,
+                                 telegram_file_info_t *info);
+void telegram_file_info_free(telegram_file_info_t *info);
+esp_err_t telegram_stream_file(const telegram_file_info_t *info,
+                               size_t chunk_size,
+                               telegram_media_chunk_cb_t cb, void *ctx);
+esp_err_t telegram_stream_file_by_id(const char *file_id, size_t chunk_size,
+                                     telegram_media_chunk_cb_t cb, void *ctx);

@@ -17,6 +17,7 @@
 #include "llm/llm_proxy.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
+#include "media/media_limits.h"
 #include "mimi_config.h"
 #include "proxy/http_proxy.h"
 #include "telegram/telegram_bot.h"
@@ -139,6 +140,7 @@ void app_main(void) {
   ESP_ERROR_CHECK(telegram_bot_init());
   ESP_ERROR_CHECK(llm_proxy_init());
   ESP_ERROR_CHECK(tool_registry_init());
+  media_limits_init();
   tool_time_init();
   ESP_ERROR_CHECK(agent_loop_init());
   scheduler_init();

@@ -1,8 +1,8 @@
 #pragma once
 
 #include "esp_err.h"
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /**
  * Initialize proxy module.
@@ -23,6 +23,12 @@ esp_err_t http_proxy_set(const char *host, uint16_t port);
  * Remove proxy config from NVS.
  */
 esp_err_t http_proxy_clear(void);
+
+/**
+ * Getters for active proxy config.
+ */
+const char *http_proxy_get_host(void);
+uint16_t http_proxy_get_port(void);
 
 /* ── Proxied HTTPS connection ─────────────────────────────────── */
 

@@ -52,7 +52,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
       if (new_cap < resp->len + evt->data_len + 1) {
         new_cap = resp->len + evt->data_len + 1;
       }
-      char *tmp = realloc(resp->buf, new_cap);
+      char *tmp = heap_caps_realloc(resp->buf, new_cap, MALLOC_CAP_SPIRAM);
       if (!tmp)
         return ESP_ERR_NO_MEM;
       resp->buf = tmp;
@@ -236,10 +236,6 @@ static void process_updates(const char *json_str) {
     if (!message)
       continue;
 
-    cJSON *text = cJSON_GetObjectItem(message, "text");
-    if (!text || !cJSON_IsString(text))
-      continue;
-
     cJSON *chat = cJSON_GetObjectItem(message, "chat");
     if (!chat)
       continue;
@@ -257,16 +253,58 @@ static void process_updates(const char *json_str) {
       continue;
     }
 
-    ESP_LOGI(TAG, "Authorized message from chat %s: %.40s...", chat_id_str,
-             text->valuestring);
-
-    /* Push to inbound bus */
+    /* Message contents */
     mimi_msg_t msg = {0};
     strncpy(msg.channel, MIMI_CHAN_TELEGRAM, sizeof(msg.channel) - 1);
     strncpy(msg.chat_id, chat_id_str, sizeof(msg.chat_id) - 1);
-    msg.content = strdup(text->valuestring);
+
+    cJSON *text = cJSON_GetObjectItem(message, "text");
+    cJSON *photo = cJSON_GetObjectItem(message, "photo");
+    cJSON *voice = cJSON_GetObjectItem(message, "voice");
+    cJSON *caption = cJSON_GetObjectItem(message, "caption");
+
+    if (photo && cJSON_IsArray(photo)) {
+      /* Pick the largest photo (last element in array) */
+      int size = cJSON_GetArraySize(photo);
+      cJSON *best = cJSON_GetArrayItem(photo, size - 1);
+      cJSON *fid = cJSON_GetObjectItem(best, "file_id");
+      cJSON *fsize = cJSON_GetObjectItem(best, "file_size");
+      if (fid && cJSON_IsString(fid)) {
+        msg.type = MIMI_MSG_TYPE_PHOTO;
+        msg.media_id = strdup(fid->valuestring);
+        msg.content = strdup(caption ? caption->valuestring : "");
+        if (cJSON_IsNumber(fsize)) {
+          msg.media_size = (size_t)fsize->valuedouble;
+        }
+      }
+    } else if (voice) {
+      cJSON *fid = cJSON_GetObjectItem(voice, "file_id");
+      cJSON *fsize = cJSON_GetObjectItem(voice, "file_size");
+      cJSON *dur = cJSON_GetObjectItem(voice, "duration");
+      if (fid && cJSON_IsString(fid)) {
+        msg.type = MIMI_MSG_TYPE_VOICE;
+        msg.media_id = strdup(fid->valuestring);
+        msg.content = strdup(caption ? caption->valuestring : "");
+        if (cJSON_IsNumber(fsize))
+          msg.media_size = (size_t)fsize->valuedouble;
+        if (cJSON_IsNumber(dur))
+          msg.media_duration = (int)dur->valuedouble;
+      }
+    } else if (text && cJSON_IsString(text)) {
+      msg.type = MIMI_MSG_TYPE_TEXT;
+      msg.content = strdup(text->valuestring);
+    }
+
     if (msg.content) {
+      ESP_LOGI(TAG, "Authorized %s from chat %s: %.40s...",
+               (msg.type == MIMI_MSG_TYPE_PHOTO)   ? "photo"
+               : (msg.type == MIMI_MSG_TYPE_VOICE) ? "voice"
+                                                   : "message",
+               chat_id_str, msg.content);
       message_bus_push_inbound(&msg);
+    } else {
+      if (msg.media_id)
+        free(msg.media_id);
     }
   }
 
@@ -335,6 +373,11 @@ esp_err_t telegram_bot_start(void) {
   return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
 
+static bool is_md_word_or_hyphen_char(char c) {
+  return ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '_' || c == '-');
+}
+
 /* Simple Markdown to HTML converter for Telegram */
 static char *tg_markdown_to_html(const char *md) {
   if (!md)
@@ -397,10 +440,40 @@ static char *tg_markdown_to_html(const char *md) {
       }
       bold = !bold;
       src += 2;
-    } else if (!code && !pre &&
-               (strncmp(src, "*", 1) == 0 || strncmp(src, "_", 1) == 0)) {
-      /* Check if it's a single marker (not part of double marker handled above)
-       */
+    } else if (!code && !pre && *src == '[') {
+      const char *close = strchr(src, ']');
+      if (close && close > src + 1) {
+        bool word = true;
+        bool has_underscore = false;
+        for (const char *p = src + 1; p < close; p++) {
+          if (*p == '_')
+            has_underscore = true;
+          if (!is_md_word_or_hyphen_char(*p)) {
+            word = false;
+            break;
+          }
+        }
+
+        if (word && has_underscore) {
+          for (const char *p = src; p <= close; p++) {
+            if (*p == '<') {
+              strcpy(dst, "&lt;");
+              dst += 4;
+            } else if (*p == '>') {
+              strcpy(dst, "&gt;");
+              dst += 4;
+            } else if (*p == '&') {
+              strcpy(dst, "&amp;");
+              dst += 5;
+            } else {
+              *dst++ = *p;
+            }
+          }
+          src = close + 1;
+          continue;
+        }
+      }
+    } else if (!code && !pre && strncmp(src, "*", 1) == 0) {
       if (!italic) {
         strcpy(dst, "<i>");
         dst += 3;
@@ -410,6 +483,29 @@ static char *tg_markdown_to_html(const char *md) {
       }
       italic = !italic;
       src += 1;
+    } else if (!code && !pre && strncmp(src, "_", 1) == 0) {
+      const char prev = (src == md) ? '\0' : src[-1];
+      const char next = src[1];
+      bool prev_word = (prev != '\0') &&
+                       ((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
+                        (prev >= '0' && prev <= '9') || prev == '_');
+      bool next_word = (next != '\0') &&
+                       ((next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') ||
+                        (next >= '0' && next <= '9') || next == '_');
+
+      if (prev_word && next_word) {
+        *dst++ = *src++;
+      } else {
+        if (!italic) {
+          strcpy(dst, "<i>");
+          dst += 3;
+        } else {
+          strcpy(dst, "</i>");
+          dst += 4;
+        }
+        italic = !italic;
+        src += 1;
+      }
     } else {
       /* Literal character with HTML escaping if not in code/pre */
       if (*src == '<') {
@@ -562,4 +658,149 @@ void telegram_auth_list(void) {
   /* Simple list via iterator if supported, or just print break-glass */
   printf("  [Static] Break-glass Admin: %" PRId64 "\n",
          (int64_t)MIMI_BREAK_GLASS_ADMIN_ID);
+}
+
+typedef struct {
+  telegram_media_chunk_cb_t cb;
+  void *ctx;
+  esp_err_t status;
+} tg_stream_ctx_t;
+
+static esp_err_t telegram_stream_event_handler(esp_http_client_event_t *evt) {
+  tg_stream_ctx_t *sctx = (tg_stream_ctx_t *)evt->user_data;
+  if (!sctx || sctx->status != ESP_OK)
+    return sctx ? sctx->status : ESP_FAIL;
+
+  if (evt->event_id == HTTP_EVENT_ON_DATA && evt->data_len > 0) {
+    sctx->status = sctx->cb((const uint8_t *)evt->data, evt->data_len,
+                            sctx->ctx);
+  }
+  return sctx->status;
+}
+
+esp_err_t telegram_get_file_info(const char *file_id,
+                                 telegram_file_info_t *info) {
+  if (!file_id || !info || s_bot_token[0] == '\0')
+    return ESP_ERR_INVALID_ARG;
+
+  memset(info, 0, sizeof(*info));
+
+  char params[256];
+  snprintf(params, sizeof(params), "getFile?file_id=%s", file_id);
+  char *resp = tg_api_call(params, NULL);
+  if (!resp)
+    return ESP_FAIL;
+
+  cJSON *root = cJSON_Parse(resp);
+  free(resp);
+  if (!root)
+    return ESP_FAIL;
+
+  esp_err_t ret = ESP_FAIL;
+  cJSON *ok = cJSON_GetObjectItem(root, "ok");
+  if (cJSON_IsTrue(ok)) {
+    cJSON *result = cJSON_GetObjectItem(root, "result");
+    cJSON *fpath = cJSON_GetObjectItem(result, "file_path");
+    cJSON *fsize = cJSON_GetObjectItem(result, "file_size");
+    if (cJSON_IsString(fpath)) {
+      info->path = strdup(fpath->valuestring);
+      if (info->path) {
+        if (cJSON_IsNumber(fsize)) {
+          info->size = (size_t)fsize->valuedouble;
+        }
+        ret = ESP_OK;
+      }
+    } else {
+      cJSON *desc = cJSON_GetObjectItem(root, "description");
+      ESP_LOGW(TAG, "No file_path for file_id=%s: %s",
+               file_id, desc ? desc->valuestring : "unknown");
+    }
+  } else {
+    cJSON *desc = cJSON_GetObjectItem(root, "description");
+    ESP_LOGW(TAG, "getFile failed for file_id=%s: %s", file_id,
+             desc ? desc->valuestring : "unknown");
+  }
+  cJSON_Delete(root);
+  return ret;
+}
+
+void telegram_file_info_free(telegram_file_info_t *info) {
+  if (!info)
+    return;
+  free(info->path);
+  info->path = NULL;
+  info->size = 0;
+}
+
+static esp_err_t telegram_stream_file_internal(const char *file_path,
+                                               size_t chunk_size,
+                                               telegram_media_chunk_cb_t cb,
+                                               void *ctx) {
+  if (!file_path || !cb || s_bot_token[0] == '\0')
+    return ESP_ERR_INVALID_ARG;
+
+  char url[256];
+  snprintf(url, sizeof(url), "https://api.telegram.org/file/bot%s/%s",
+           s_bot_token, file_path);
+
+  if (chunk_size == 0 || chunk_size > MIMI_MEDIA_STREAM_CHUNK)
+    chunk_size = MIMI_MEDIA_STREAM_CHUNK;
+
+  tg_stream_ctx_t sctx = {.cb = cb, .ctx = ctx, .status = ESP_OK};
+
+  esp_http_client_config_t config = {
+      .url = url,
+      .event_handler = telegram_stream_event_handler,
+      .user_data = &sctx,
+      .timeout_ms = 30000,
+      .buffer_size = chunk_size,
+      .buffer_size_tx = chunk_size,
+      .crt_bundle_attach = esp_crt_bundle_attach,
+  };
+
+  if (http_proxy_is_enabled()) {
+    config.host = http_proxy_get_host();
+    config.port = http_proxy_get_port();
+    config.transport_type = HTTP_TRANSPORT_OVER_TCP;
+  }
+
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (!client)
+    return ESP_ERR_NO_MEM;
+
+  esp_err_t err = esp_http_client_perform(client);
+  int status = esp_http_client_get_status_code(client);
+  if (err != ESP_OK || status != 200 || sctx.status != ESP_OK) {
+    ESP_LOGE(TAG, "telegram stream failed path=%s status=%d cb=%s err=%s", file_path,
+             status, esp_err_to_name(sctx.status), esp_err_to_name(err));
+  }
+  esp_http_client_cleanup(client);
+
+  if (err != ESP_OK)
+    return err;
+  if (sctx.status != ESP_OK)
+    return sctx.status;
+  if (status != 200)
+    return ESP_FAIL;
+  return ESP_OK;
+}
+
+esp_err_t telegram_stream_file(const telegram_file_info_t *info,
+                               size_t chunk_size,
+                               telegram_media_chunk_cb_t cb, void *ctx) {
+  if (!info || !info->path)
+    return ESP_ERR_INVALID_ARG;
+  return telegram_stream_file_internal(info->path, chunk_size, cb, ctx);
+}
+
+esp_err_t telegram_stream_file_by_id(const char *file_id, size_t chunk_size,
+                                     telegram_media_chunk_cb_t cb,
+                                     void *ctx) {
+  telegram_file_info_t info;
+  esp_err_t err = telegram_get_file_info(file_id, &info);
+  if (err != ESP_OK)
+    return err;
+  err = telegram_stream_file(&info, chunk_size, cb, ctx);
+  telegram_file_info_free(&info);
+  return err;
 }

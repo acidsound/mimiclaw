@@ -211,7 +211,18 @@ Verify that redirects cannot bypass SSRF filters.
   ```
   - **PASS**: `truncated: true`, body length 8192. No system crash or OOM.
 
-### Test E: Session Cookie Protection
+### Test E: Media Streaming & Limits
+
+- **E1: Photo Quick-Way Flow**
+  1. Run `set_media_limits 1024 400 10` over the serial CLI.
+  2. Send a Telegram photo using the "Quick way" option (<1 MB). Observe serial logs for `telegram_stream_file` chunk sizes (≤16 KB) and expect a normal LLM reply.
+  3. Send a large/original photo (>1 MB). **PASS** if the bot responds with the English memory-limit notice and no crash occurs.
+
+- **E2: Voice STT Flow**
+  1. Send a ≤10 s voice note. **PASS** if the reply contains `[Voice: ...]` with Groq transcription and no PSRAM spike beyond ~32 KB.
+  2. Send a >10 s or >400 KB voice note. **PASS** if the bot immediately replies with the English limit notice and skips STT.
+
+### Test F: Session Cookie Protection
 
 - **E1: Cookie storage via `session_key`**
   ```bash

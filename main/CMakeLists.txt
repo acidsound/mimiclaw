@@ -5,11 +5,13 @@ idf_component_register(
         "wifi/wifi_manager.c"
         "telegram/telegram_bot.c"
         "llm/llm_proxy.c"
+        "llm/llm_stt.c"
         "agent/agent_loop.c"
         "agent/context_builder.c"
         "agent/scheduler.c"
         "memory/memory_store.c"
         "memory/session_mgr.c"
+        "media/media_limits.c"
         "gateway/ws_server.c"
         "cli/serial_cli.c"
         "ota/ota_manager.c"
@@ -22,11 +24,13 @@ idf_component_register(
         "tools/tool_http.c"
         "tools/tool_memory.c"
         "tools/tool_system.c"
+        "tools/tool_stt.c"
         "utils/log_redact.c"
+        "utils/base64_stream.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         nvs_flash esp_wifi esp_netif esp_http_client esp_http_server
-        esp_https_ota esp_event json spiffs console vfs app_update esp-tls
+        esp_https_ota esp_event json spiffs console vfs app_update esp-tls mbedtls
         espressif__mdns espressif__sock_utils
 )

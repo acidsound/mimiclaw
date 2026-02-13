@@ -37,6 +37,21 @@
 #ifndef MIMI_SECRET_BASE_URL
 #define MIMI_SECRET_BASE_URL ""
 #endif
+#ifndef MIMI_SECRET_GROQ_KEY
+#define MIMI_SECRET_GROQ_KEY ""
+#endif
+#ifndef MIMI_SECRET_STT_PROVIDER
+#define MIMI_SECRET_STT_PROVIDER 0
+#endif
+#ifndef MIMI_SECRET_STT_KEY
+#define MIMI_SECRET_STT_KEY MIMI_SECRET_GROQ_KEY
+#endif
+#ifndef MIMI_SECRET_STT_BASE_URL
+#define MIMI_SECRET_STT_BASE_URL "https://api.groq.com/openai/v1"
+#endif
+#ifndef MIMI_SECRET_STT_MODEL
+#define MIMI_SECRET_STT_MODEL "whisper-large-v3"
+#endif
 
 /* WiFi */
 #define MIMI_WIFI_MAX_RETRY 10
@@ -49,6 +64,10 @@
 #define MIMI_TG_POLL_STACK (12 * 1024)
 #define MIMI_TG_POLL_PRIO 5
 #define MIMI_TG_POLL_CORE 0
+#define MIMI_MEDIA_STREAM_CHUNK (16 * 1024)
+#define MIMI_MEDIA_MAX_PHOTO_BYTES (1024 * 1024)    /* 1 MB */
+#define MIMI_MEDIA_MAX_VOICE_BYTES (400 * 1024)      /* 400 KB */
+#define MIMI_MEDIA_MAX_VOICE_SECONDS 10
 
 /* Agent Loop */
 #define MIMI_AGENT_STACK (12 * 1024)
@@ -66,6 +85,7 @@
 /* LLM Providers */
 #define MIMI_LLM_PROVIDER_ANTHROPIC 0
 #define MIMI_LLM_PROVIDER_OPENAI 1
+#define MIMI_STT_PROVIDER_GROQ 0
 
 /* LLM Defaults */
 #define MIMI_LLM_DEFAULT_PROVIDER MIMI_LLM_PROVIDER_ANTHROPIC
@@ -73,6 +93,9 @@
 #define MIMI_LLM_MAX_TOKENS 4096
 #define MIMI_LLM_API_URL_ANTHROPIC "https://api.anthropic.com/v1/messages"
 #define MIMI_LLM_API_URL_OPENAI "https://api.openai.com/v1/chat/completions"
+#define MIMI_STT_DEFAULT_PROVIDER MIMI_STT_PROVIDER_GROQ
+#define MIMI_STT_DEFAULT_MODEL MIMI_SECRET_STT_MODEL
+#define MIMI_STT_TRANSCRIBE_PATH "/audio/transcriptions"
 #define MIMI_LLM_API_VERSION "2023-06-01"
 #define MIMI_LLM_STREAM_BUF_SIZE (32 * 1024)
 
@@ -116,6 +139,7 @@
 #define MIMI_NVS_LLM "llm_config"
 #define MIMI_NVS_PROXY "proxy_config"
 #define MIMI_NVS_SEARCH "search_config"
+#define MIMI_NVS_MEDIA "media_config"
 
 /* NVS Keys */
 #define MIMI_NVS_KEY_SSID "ssid"
@@ -127,9 +151,16 @@
 #define MIMI_NVS_KEY_PROXY_PORT "port"
 #define MIMI_NVS_KEY_PROVIDER "provider"
 #define MIMI_NVS_KEY_BASE_URL "base_url"
+#define MIMI_NVS_KEY_STT_PROVIDER "stt_provider"
+#define MIMI_NVS_KEY_STT_BASE_URL "stt_base_url"
+#define MIMI_NVS_KEY_STT_MODEL "stt_model"
+#define MIMI_NVS_KEY_STT_KEY "stt_key"
 #define MIMI_NVS_KEY_TIMEZONE "timezone"
 #define MIMI_NVS_KEY_ACTIVE_PF "active_pf"
 #define MIMI_NVS_KEY_PF_LIST "pf_list"
+#define MIMI_NVS_KEY_MEDIA_PHOTO "photo_limit"
+#define MIMI_NVS_KEY_MEDIA_VOICE_BYTES "voice_limit"
+#define MIMI_NVS_KEY_MEDIA_VOICE_SECS "voice_secs"
 
 /* Custom Error Codes */
 #define ESP_ERR_ADMISSION_CONTROL 0x10B

@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "mbedtls/base64.h"
 #include "nvs.h"
 #include <ctype.h>
 #include <stdlib.h>
@@ -617,6 +618,51 @@ static cJSON *convert_anthropic_to_openai_messages(cJSON *anth_msgs) {
           cJSON *text = cJSON_GetObjectItem(block, "text");
           if (text && cJSON_IsString(text)) {
             cJSON_AddStringToObject(oa_msg, "content", text->valuestring);
+          }
+        } else if (strcmp(type->valuestring, "image") == 0) {
+          /* Anthropic image block -> OpenAI image_url */
+          if (!oa_msg) {
+            oa_msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(oa_msg, "role", role->valuestring);
+            cJSON_AddItemToArray(oa_msgs, oa_msg);
+          }
+          cJSON *content_arr = cJSON_GetObjectItem(oa_msg, "content");
+          if (!content_arr || !cJSON_IsArray(content_arr)) {
+            /* If content was a string, convert to array */
+            if (cJSON_IsString(content_arr)) {
+              char *old_text = strdup(content_arr->valuestring);
+              cJSON_DeleteItemFromObject(oa_msg, "content");
+              content_arr = cJSON_CreateArray();
+              cJSON_AddItemToObject(oa_msg, "content", content_arr);
+              cJSON *txt_block = cJSON_CreateObject();
+              cJSON_AddStringToObject(txt_block, "type", "text");
+              cJSON_AddStringToObject(txt_block, "text", old_text);
+              cJSON_AddItemToArray(content_arr, txt_block);
+              free(old_text);
+            } else {
+              content_arr = cJSON_CreateArray();
+              cJSON_AddItemToObject(oa_msg, "content", content_arr);
+            }
+          }
+          cJSON *source = cJSON_GetObjectItem(block, "source");
+          cJSON *data = cJSON_GetObjectItem(source, "data");
+          cJSON *mtype = cJSON_GetObjectItem(source, "media_type");
+          if (data && mtype) {
+            cJSON *img_block = cJSON_CreateObject();
+            cJSON_AddStringToObject(img_block, "type", "image_url");
+            cJSON *url_obj = cJSON_CreateObject();
+            char b64_url[128];
+            snprintf(b64_url, sizeof(b64_url), "data:%s;base64,",
+                     mtype->valuestring);
+            size_t total_len = strlen(b64_url) + strlen(data->valuestring) + 1;
+            char *full_url = malloc(total_len);
+            if (full_url) {
+              snprintf(full_url, total_len, "%s%s", b64_url, data->valuestring);
+              cJSON_AddStringToObject(url_obj, "url", full_url);
+              free(full_url);
+            }
+            cJSON_AddItemToObject(img_block, "image_url", url_obj);
+            cJSON_AddItemToArray(content_arr, img_block);
           }
         } else if (strcmp(type->valuestring, "tool_use") == 0) {
           if (!oa_msg) { // Create a new message if not already started for this
@@ -1367,4 +1413,24 @@ esp_err_t llm_set_timezone(const char *tz) {
 
   ESP_LOGI(TAG, "Timezone saved: %s", tz);
   return ESP_OK;
+}
+
+char *llm_util_base64_encode(const uint8_t *src, size_t slen) {
+  size_t dlen = 0;
+  mbedtls_base64_encode(NULL, 0, &dlen, src, slen); // Get required length
+  if (dlen == 0)
+    return NULL;
+
+  char *dst = heap_caps_malloc(dlen + 1, MALLOC_CAP_SPIRAM);
+  if (!dst)
+    return NULL;
+
+  size_t olen = 0;
+  if (mbedtls_base64_encode((unsigned char *)dst, dlen, &olen, src, slen) !=
+      0) {
+    free(dst);
+    return NULL;
+  }
+  dst[olen] = '\0';
+  return dst;
 }

@@ -94,17 +94,20 @@ static size_t url_encode(const char *src, char *dst, size_t dst_size)
 
 /* ── Format results as readable text ──────────────────────────── */
 
-static void format_results(cJSON *root, char *output, size_t output_size)
+static void format_results(cJSON *root, const char *query, char *output,
+                          size_t output_size)
 {
     cJSON *web = cJSON_GetObjectItem(root, "web");
     if (!web) {
-        snprintf(output, output_size, "No web results found.");
+        snprintf(output, output_size, "No web results found for \"%s\".",
+                 query ? query : "(unknown query)");
         return;
     }
 
     cJSON *results = cJSON_GetObjectItem(web, "results");
     if (!results || !cJSON_IsArray(results) || cJSON_GetArraySize(results) == 0) {
-        snprintf(output, output_size, "No web results found.");
+        snprintf(output, output_size, "No web results found for \"%s\".",
+                 query ? query : "(unknown query)");
         return;
     }
 
@@ -227,9 +230,10 @@ static esp_err_t search_via_proxy(const char *path, search_buf_t *sb)
 esp_err_t tool_web_search_execute(const char *input_json, char *output, size_t output_size)
 {
     if (s_search_key[0] == '\0') {
-        snprintf(output, output_size, "Error: No search API key configured. Set MIMI_SECRET_SEARCH_KEY in mimi_secrets.h");
-        return ESP_ERR_INVALID_STATE;
-    }
+    snprintf(output, output_size,
+             "Error: No search API key configured. Set MIMI_SECRET_SEARCH_KEY in mimi_secrets.h");
+    return ESP_ERR_INVALID_STATE;
+  }
 
     /* Parse input to get query */
     cJSON *input = cJSON_Parse(input_json);
@@ -244,6 +248,8 @@ esp_err_t tool_web_search_execute(const char *input_json, char *output, size_t o
         snprintf(output, output_size, "Error: Missing 'query' field");
         return ESP_ERR_INVALID_ARG;
     }
+    char query_text[257];
+    snprintf(query_text, sizeof(query_text), "%s", query->valuestring);
 
     ESP_LOGI(TAG, "Searching: %s", query->valuestring);
 
@@ -290,7 +296,7 @@ esp_err_t tool_web_search_execute(const char *input_json, char *output, size_t o
         return ESP_FAIL;
     }
 
-    format_results(root, output, output_size);
+    format_results(root, query_text, output, output_size);
     cJSON_Delete(root);
 
     ESP_LOGI(TAG, "Search complete, %d bytes result", (int)strlen(output));
