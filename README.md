@@ -115,6 +115,8 @@ idf.py -p PORT flash monitor
 
 ```
 mimi> wifi_set MySSID MyPassword   # WiFi 네트워크 변경
+mimi> wifi_reset                   # WiFi 자격증명 초기화(시크릿 fallback 비활성)
+mimi> wifi_portal 600              # 10분간 SoftAP 포털 실행 (초 단위)
 mimi> set_tg_token 123456:ABC...   # 텔레그램 봇 토큰 변경
 
 # LLM 설정
@@ -152,6 +154,51 @@ mimi> session_list             # 모든 채팅 세션 목록
 mimi> session_clear 12345      # 특정 대화 내역 삭제
 mimi> restart                  # 재부팅
 ```
+
+### 플래싱 후 사용자 온보딩 튜토리얼
+
+아래 순서대로 진행하면, 노트북이 있든 없든 초기 설정을 빠르게 끝낼 수 있습니다.
+
+1) **기본 연결 확인 (시리얼)**
+```bash
+mimi> wifi_status
+```
+
+2) **WiFi를 바로 넣을 수 있으면 시리얼로 설정**
+```bash
+mimi> wifi_set MySSID MyPassword
+mimi> restart
+```
+
+3) **WiFi 환경이 바뀌었거나 SSID/비밀번호를 모르면 SoftAP 포털 사용**
+```bash
+mimi> wifi_reset
+mimi> wifi_portal 600
+```
+- SoftAP SSID: `MimiClaw-XXXX` (랜덤 suffix)
+- SoftAP 비밀번호: `mimiclaw1`
+- 접속 URL: `http://192.168.4.1`
+- 연결 성공 시 포털은 자동 종료되고 STA 모드만 유지됩니다.
+
+4) **텔레그램 토큰 설정**
+```bash
+mimi> set_tg_token 123456:ABC...
+mimi> restart
+```
+
+5) **텔레그램 사용자 권한(chat_id) 등록**
+```bash
+mimi> tg_auth_add <chat_id>
+mimi> tg_auth_list
+```
+
+6) **텔레그램에서 `/help`로 명령어 확인**
+- `/help`, `/start`, `/commands`, `/whoami`, `/status`
+- `/pf_ls`, `/pf_use <name>`, `/pf_rm <name>` (`/pf_del` 별칭)
+- `/set_provider <anthropic|openai|0|1>`
+- `/set_model <model>`, `/set_base_url <url>`, `/set_api_key <key>`
+- `/set_stt_provider <groq|0>`, `/set_stt_model <model>`
+- `/set_stt_base_url <url>`, `/set_stt_key <key>`
 
 ## 보안 및 저장소
 

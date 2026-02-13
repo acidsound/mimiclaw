@@ -57,6 +57,10 @@
 #define MIMI_WIFI_MAX_RETRY 10
 #define MIMI_WIFI_RETRY_BASE_MS 1000
 #define MIMI_WIFI_RETRY_MAX_MS 30000
+#define MIMI_WIFI_PROV_AP_PREFIX "MimiClaw"
+#define MIMI_WIFI_PROV_AP_PASS "mimiclaw1"
+#define MIMI_WIFI_PROV_AP_MAX_CONN 4
+#define MIMI_WIFI_PROV_TIMEOUT_MS (10 * 60 * 1000)
 
 /* Telegram Bot */
 #define MIMI_TG_POLL_TIMEOUT_S 30
@@ -144,6 +148,7 @@
 /* NVS Keys */
 #define MIMI_NVS_KEY_SSID "ssid"
 #define MIMI_NVS_KEY_PASS "password"
+#define MIMI_NVS_KEY_WIFI_NO_SECRET "no_secret_fb"
 #define MIMI_NVS_KEY_TG_TOKEN "bot_token"
 #define MIMI_NVS_KEY_API_KEY "api_key"
 #define MIMI_NVS_KEY_MODEL "model"

@@ -130,6 +130,8 @@ mimi> clear_proxy                    # 清除代理
 
 ```
 mimi> wifi_set MySSID MyPassword   # 换 WiFi
+mimi> wifi_reset                   # 重置 WiFi 凭据（清 NVS + 禁用编译时回退）
+mimi> wifi_portal 600              # 启动 SoftAP 配网门户（单位：秒）
 mimi> set_tg_token 123456:ABC...   # 换 Telegram Bot Token
 
 # LLM 配置
@@ -149,6 +151,45 @@ mimi> set_media_limits 1024 400 10   # 图片KB/语音KB/秒数
 mimi> config_show                  # 查看所有配置（脱敏显示）
 mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 ```
+
+### 烧录后上手流程（串口 + SoftAP + Telegram）
+
+推荐按以下顺序操作：
+
+1. 先看网络状态：
+```bash
+mimi> wifi_status
+```
+
+2. 已知 WiFi 账号密码时，直接设置：
+```bash
+mimi> wifi_set MySSID MyPassword
+mimi> restart
+```
+
+3. 不知道密码或环境变化时，用 SoftAP 配网：
+```bash
+mimi> wifi_reset
+mimi> wifi_portal 600
+```
+- SoftAP SSID：`MimiClaw-XXXX`（随机后缀）
+- SoftAP 密码：`mimiclaw1`
+- 门户地址：`http://192.168.4.1`
+- STA 连接成功后，SoftAP/门户会自动关闭。
+
+4. 设置 Telegram token：
+```bash
+mimi> set_tg_token 123456:ABC...
+mimi> restart
+```
+
+5. 授权 Telegram chat_id：
+```bash
+mimi> tg_auth_add <chat_id>
+mimi> tg_auth_list
+```
+
+6. 在 Telegram 里发送 `/help`，确认命令路由正常。
 
 **调试与运维：**
 

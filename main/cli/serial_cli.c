@@ -60,6 +60,54 @@ static int cmd_wifi_status(int argc, char **argv) {
   return 0;
 }
 
+/* --- wifi_reset command --- */
+static int cmd_wifi_reset(int argc, char **argv) {
+  esp_err_t err = wifi_manager_reset_credentials();
+  if (err != ESP_OK) {
+    printf("Failed to reset WiFi credentials: %s\n", esp_err_to_name(err));
+    return 1;
+  }
+
+  printf("WiFi credentials cleared (including secret fallback disable).\n");
+  printf("Use 'wifi_portal' or 'wifi_set <ssid> <password>'.\n");
+  return 0;
+}
+
+/* --- wifi_portal command --- */
+static struct {
+  struct arg_int *timeout_sec;
+  struct arg_end *end;
+} wifi_portal_args;
+
+static int cmd_wifi_portal(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&wifi_portal_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, wifi_portal_args.end, argv[0]);
+    return 1;
+  }
+
+  uint32_t timeout_ms = MIMI_WIFI_PROV_TIMEOUT_MS;
+  if (wifi_portal_args.timeout_sec->count > 0) {
+    int sec = wifi_portal_args.timeout_sec->ival[0];
+    if (sec <= 0) {
+      printf("timeout_sec must be > 0\n");
+      return 1;
+    }
+    timeout_ms = (uint32_t)sec * 1000U;
+  }
+
+  printf("Starting WiFi provisioning portal (timeout=%u ms)...\n",
+         (unsigned)timeout_ms);
+  esp_err_t err = wifi_manager_run_provisioning_portal(timeout_ms);
+  if (err == ESP_OK && wifi_manager_is_connected()) {
+    printf("Provisioning successful. IP: %s\n", wifi_manager_get_ip());
+    return 0;
+  }
+
+  printf("Provisioning not completed.\n");
+  return 1;
+}
+
 /* --- set_tg_token command --- */
 static struct {
   struct arg_str *token;
@@ -865,6 +913,26 @@ esp_err_t serial_cli_init(void) {
       .func = &cmd_wifi_status,
   };
   esp_console_cmd_register(&wifi_status_cmd);
+
+  /* wifi_reset */
+  esp_console_cmd_t wifi_reset_cmd = {
+      .command = "wifi_reset",
+      .help = "Reset WiFi creds (NVS + disable secret fallback)",
+      .func = &cmd_wifi_reset,
+  };
+  esp_console_cmd_register(&wifi_reset_cmd);
+
+  /* wifi_portal */
+  wifi_portal_args.timeout_sec =
+      arg_int0(NULL, NULL, "[timeout_sec]", "Provisioning timeout in seconds");
+  wifi_portal_args.end = arg_end(1);
+  esp_console_cmd_t wifi_portal_cmd = {
+      .command = "wifi_portal",
+      .help = "Start SoftAP WiFi provisioning portal",
+      .func = &cmd_wifi_portal,
+      .argtable = &wifi_portal_args,
+  };
+  esp_console_cmd_register(&wifi_portal_cmd);
 
   /* set_tg_token */
   tg_token_args.token = arg_str1(NULL, NULL, "<token>", "Telegram bot token");

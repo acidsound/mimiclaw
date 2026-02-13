@@ -115,6 +115,8 @@ Connect via serial to configure or debug. **Config commands** let you change set
 
 ```
 mimi> wifi_set MySSID MyPassword   # change WiFi network
+mimi> wifi_reset                   # reset WiFi creds (NVS + disable secret fallback)
+mimi> wifi_portal 600              # start SoftAP portal for 10 minutes (seconds)
 mimi> set_tg_token 123456:ABC...   # change Telegram bot token
 
 # LLM Configuration
@@ -137,6 +139,45 @@ mimi> tg_auth_list                 # list authorized users
 mimi> config_show                  # show all config (masked)
 mimi> config_reset                 # clear NVS, revert to build-time defaults
 ```
+
+### Post-Flash Onboarding (Serial + SoftAP + Telegram)
+
+Use this flow after flashing:
+
+1. Check current network status:
+```bash
+mimi> wifi_status
+```
+
+2. If you already know WiFi credentials, set them directly:
+```bash
+mimi> wifi_set MySSID MyPassword
+mimi> restart
+```
+
+3. If WiFi changed or you do not know credentials, use SoftAP provisioning:
+```bash
+mimi> wifi_reset
+mimi> wifi_portal 600
+```
+- SoftAP SSID: `MimiClaw-XXXX` (random suffix)
+- SoftAP password: `mimiclaw1`
+- Portal URL: `http://192.168.4.1`
+- After successful STA connect, SoftAP/portal are stopped automatically.
+
+4. Set Telegram token:
+```bash
+mimi> set_tg_token 123456:ABC...
+mimi> restart
+```
+
+5. Authorize Telegram chat IDs:
+```bash
+mimi> tg_auth_add <chat_id>
+mimi> tg_auth_list
+```
+
+6. In Telegram, run `/help` to verify command routing.
 
 **Debug & maintenance:**
 

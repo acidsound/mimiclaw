@@ -41,6 +41,22 @@ const char *wifi_manager_get_ip(void);
 esp_err_t wifi_manager_set_credentials(const char *ssid, const char *password);
 
 /**
+ * Clear WiFi credentials and disable build-time secret fallback until new
+ * credentials are saved.
+ */
+esp_err_t wifi_manager_reset_credentials(void);
+
+/**
  * Get the event group for WiFi state (WIFI_CONNECTED_BIT / WIFI_FAIL_BIT).
  */
 EventGroupHandle_t wifi_manager_get_event_group(void);
+
+/**
+ * Start a temporary SoftAP + HTTP provisioning portal.
+ * The portal allows selecting SSID/password and testing connection.
+ * On success, credentials are stored in NVS.
+ *
+ * @param timeout_ms Maximum portal lifetime in milliseconds (UINT32_MAX to wait forever)
+ * @return ESP_OK on successful provisioning + STA connect, ESP_ERR_TIMEOUT otherwise
+ */
+esp_err_t wifi_manager_run_provisioning_portal(uint32_t timeout_ms);

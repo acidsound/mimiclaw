@@ -1,14 +1,18 @@
 #include "telegram_bot.h"
 #include "bus/message_bus.h"
+#include "llm/llm_proxy.h"
+#include "llm/llm_stt.h"
 #include "mimi_config.h"
 #include "proxy/http_proxy.h"
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "freertos/task.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -205,6 +209,406 @@ static char *tg_api_call(const char *method, const char *post_data) {
                                   (MIMI_TG_POLL_TIMEOUT_S + 5) * 1000);
 }
 
+static esp_err_t telegram_sync_commands(void) {
+  static const char *commands_payload =
+      "{"
+      "\"commands\":["
+      "{\"command\":\"help\",\"description\":\"Show available commands\"},"
+      "{\"command\":\"start\",\"description\":\"Start and show usage\"},"
+      "{\"command\":\"commands\",\"description\":\"Alias of /help\"},"
+      "{\"command\":\"whoami\",\"description\":\"Show your chat id\"},"
+      "{\"command\":\"status\",\"description\":\"Show current status\"},"
+      "{\"command\":\"pf_ls\",\"description\":\"List LLM profiles\"},"
+      "{\"command\":\"pf_use\",\"description\":\"Switch LLM profile\"},"
+      "{\"command\":\"pf_rm\",\"description\":\"Delete LLM profile\"},"
+      "{\"command\":\"set_provider\",\"description\":\"Set LLM provider\"},"
+      "{\"command\":\"set_model\",\"description\":\"Set LLM model\"},"
+      "{\"command\":\"set_base_url\",\"description\":\"Set LLM base URL\"},"
+      "{\"command\":\"set_api_key\",\"description\":\"Set LLM API key\"},"
+      "{\"command\":\"set_stt_provider\",\"description\":\"Set STT provider\"},"
+      "{\"command\":\"set_stt_model\",\"description\":\"Set STT model\"},"
+      "{\"command\":\"set_stt_base_url\",\"description\":\"Set STT base URL\"},"
+      "{\"command\":\"set_stt_key\",\"description\":\"Set STT API key\"}"
+      "]"
+      "}";
+
+  char *resp = tg_api_call_with_timeout("setMyCommands", commands_payload,
+                                        TELEGRAM_SEND_TIMEOUT_MS);
+  if (!resp) {
+    ESP_LOGW(TAG, "setMyCommands failed: no response");
+    return ESP_FAIL;
+  }
+
+  esp_err_t ret = ESP_FAIL;
+  cJSON *root = cJSON_Parse(resp);
+  if (root) {
+    cJSON *ok = cJSON_GetObjectItem(root, "ok");
+    if (cJSON_IsTrue(ok)) {
+      ret = ESP_OK;
+    } else {
+      cJSON *desc = cJSON_GetObjectItem(root, "description");
+      ESP_LOGW(TAG, "setMyCommands rejected: %s",
+               cJSON_IsString(desc) ? desc->valuestring : "unknown");
+    }
+    cJSON_Delete(root);
+  } else {
+    ESP_LOGW(TAG, "setMyCommands parse failed");
+  }
+
+  free(resp);
+  return ret;
+}
+
+static const char *skip_spaces(const char *s) {
+  while (s && *s && isspace((unsigned char)*s)) {
+    s++;
+  }
+  return s;
+}
+
+static bool extract_slash_command(const char *text, char *cmd, size_t cmd_cap,
+                                  const char **out_args) {
+  if (!text || text[0] != '/' || cmd_cap < 2) {
+    return false;
+  }
+
+  const char *p = text + 1;
+  size_t n = 0;
+  while (*p && !isspace((unsigned char)*p) && *p != '@') {
+    if (n + 1 >= cmd_cap) {
+      return false;
+    }
+    cmd[n++] = *p++;
+  }
+
+  if (*p == '@') {
+    while (*p && !isspace((unsigned char)*p)) {
+      p++;
+    }
+  }
+
+  cmd[n] = '\0';
+  if (out_args) {
+    *out_args = skip_spaces(p);
+  }
+  return n > 0;
+}
+
+static void send_profile_list_message(const char *chat_id) {
+  char list[256] = {0};
+  nvs_handle_t nvs;
+  if (nvs_open(MIMI_NVS_LLM, NVS_READONLY, &nvs) == ESP_OK) {
+    size_t len = sizeof(list);
+    nvs_get_str(nvs, MIMI_NVS_KEY_PF_LIST, list, &len);
+    nvs_close(nvs);
+  }
+
+  const char *active = llm_get_active_profile();
+  char msg[768];
+  int off = snprintf(msg, sizeof(msg), "Active profile: %s\nProfiles:\n",
+                     active ? active : "default");
+
+  bool has_default = false;
+  if (list[0]) {
+    char list_copy[256];
+    strncpy(list_copy, list, sizeof(list_copy) - 1);
+    list_copy[sizeof(list_copy) - 1] = '\0';
+
+    char *token = strtok(list_copy, ",");
+    while (token && off < (int)sizeof(msg) - 32) {
+      bool is_active = (active && strcmp(token, active) == 0);
+      if (strcmp(token, "default") == 0) {
+        has_default = true;
+      }
+      off += snprintf(msg + off, sizeof(msg) - (size_t)off, "%s %s%s\n",
+                      is_active ? "->" : " -", token,
+                      is_active ? " [ACTIVE]" : "");
+      token = strtok(NULL, ",");
+    }
+  }
+
+  if (!has_default && off < (int)sizeof(msg) - 32) {
+    bool is_active_default = (active && strcmp(active, "default") == 0);
+    off += snprintf(msg + off, sizeof(msg) - (size_t)off, "%s default%s\n",
+                    is_active_default ? "->" : " -",
+                    is_active_default ? " [ACTIVE]" : "");
+  }
+
+  telegram_send_message(chat_id, msg);
+}
+
+static bool handle_local_command(const char *chat_id, int64_t cid,
+                                 const char *text) {
+  char cmd[32];
+  const char *args = NULL;
+  if (!extract_slash_command(text, cmd, sizeof(cmd), &args)) {
+    return false;
+  }
+
+  if (strcmp(cmd, "help") == 0 || strcmp(cmd, "start") == 0 ||
+      strcmp(cmd, "commands") == 0) {
+    telegram_send_message(
+        chat_id,
+        "Available commands:\n"
+        "/help - Show this help\n"
+        "/start - Show this help\n"
+        "/commands - Alias of /help\n"
+        "/whoami - Show your sender chat id\n"
+        "/status - Show system status\n"
+        "/pf_ls - List LLM profiles\n"
+        "/pf_use <name> - Switch active profile\n"
+        "/pf_rm <name> - Delete profile (default blocked)\n"
+        "/pf_del <name> - Alias of /pf_rm\n"
+        "/set_provider <anthropic|openai|0|1> - Set LLM provider\n"
+        "/set_model <model> - Set LLM model\n"
+        "/set_base_url <url> - Set LLM base URL\n"
+        "/set_api_key <key> - Set LLM API key\n"
+        "/set_stt_provider <groq|0> - Set STT provider\n"
+        "/set_stt_model <model> - Set STT model\n"
+        "/set_stt_base_url <url> - Set STT base URL\n"
+        "/set_stt_key <key> - Set STT API key\n\n"
+        "Usage examples:\n"
+        "/pf_use prod\n"
+        "/set_provider anthropic\n"
+        "/set_model claude-3-5-sonnet-20241022\n"
+        "/set_base_url https://api.anthropic.com/v1/messages\n"
+        "/set_stt_provider groq\n"
+        "/set_stt_model whisper-large-v3\n"
+        "/set_stt_base_url https://api.groq.com/openai/v1\n\n"
+        "Any non-command text is forwarded to the agent.");
+    return true;
+  }
+
+  if (strcmp(cmd, "whoami") == 0) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "Your chat_id is %" PRId64, cid);
+    telegram_send_message(chat_id, buf);
+    return true;
+  }
+
+  if (strcmp(cmd, "status") == 0) {
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+             "Status: running\n"
+             "Active profile: %s\n"
+             "Free heap: %u bytes\n"
+             "Free psram: %u bytes\n"
+             "Update offset: %" PRId64,
+             llm_get_active_profile(),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             s_update_offset);
+    telegram_send_message(chat_id, buf);
+    return true;
+  }
+
+  if (strcmp(cmd, "pf_ls") == 0) {
+    send_profile_list_message(chat_id);
+    return true;
+  }
+
+  if (strcmp(cmd, "pf_use") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /pf_use <name>");
+      return true;
+    }
+    char name[16] = {0};
+    size_t i = 0;
+    while (args[i] && !isspace((unsigned char)args[i]) && i < sizeof(name) - 1) {
+      name[i] = args[i];
+      i++;
+    }
+    name[i] = '\0';
+    if (name[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /pf_use <name>");
+      return true;
+    }
+    esp_err_t err = llm_profile_use(name);
+    if (err == ESP_OK) {
+      char buf[96];
+      snprintf(buf, sizeof(buf), "Active profile switched to: %s", name);
+      telegram_send_message(chat_id, buf);
+    } else {
+      telegram_send_message(chat_id,
+                            "pf_use failed. Name must be <=12 chars and "
+                            "alnum/_/- only.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "pf_rm") == 0 || strcmp(cmd, "pf_del") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /pf_rm <name>");
+      return true;
+    }
+    char name[16] = {0};
+    size_t i = 0;
+    while (args[i] && !isspace((unsigned char)args[i]) && i < sizeof(name) - 1) {
+      name[i] = args[i];
+      i++;
+    }
+    name[i] = '\0';
+    if (name[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /pf_rm <name>");
+      return true;
+    }
+
+    esp_err_t err = llm_profile_del(name);
+    if (err == ESP_OK) {
+      char buf[96];
+      snprintf(buf, sizeof(buf), "Profile deleted: %s", name);
+      telegram_send_message(chat_id, buf);
+    } else if (err == ESP_ERR_INVALID_ARG) {
+      telegram_send_message(chat_id,
+                            "pf_rm failed. 'default' cannot be deleted.");
+    } else {
+      telegram_send_message(chat_id, "pf_rm failed. Profile not found.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_provider") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id,
+                            "Usage: /set_provider <anthropic|openai|0|1>");
+      return true;
+    }
+    int provider = -1;
+    if (strcmp(args, "anthropic") == 0 || strcmp(args, "0") == 0) {
+      provider = MIMI_LLM_PROVIDER_ANTHROPIC;
+    } else if (strcmp(args, "openai") == 0 || strcmp(args, "1") == 0) {
+      provider = MIMI_LLM_PROVIDER_OPENAI;
+    }
+    if (provider < 0) {
+      telegram_send_message(
+          chat_id,
+          "Invalid provider. Use anthropic/openai (or 0/1).");
+      return true;
+    }
+    if (llm_set_provider(provider) == ESP_OK) {
+      telegram_send_message(chat_id, "LLM provider updated for active profile.");
+    } else {
+      telegram_send_message(chat_id, "Failed to set LLM provider.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_model") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /set_model <model>");
+      return true;
+    }
+    if (llm_set_model(args) == ESP_OK) {
+      telegram_send_message(chat_id, "LLM model updated for active profile.");
+    } else {
+      telegram_send_message(chat_id, "Failed to set LLM model.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_base_url") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /set_base_url <url>");
+      return true;
+    }
+    if (llm_set_base_url(args) == ESP_OK) {
+      telegram_send_message(chat_id, "LLM base URL updated for active profile.");
+    } else {
+      telegram_send_message(chat_id, "Failed to set LLM base URL.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_api_key") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /set_api_key <key>");
+      return true;
+    }
+    if (llm_set_api_key(args) == ESP_OK) {
+      telegram_send_message(chat_id, "LLM API key updated for active profile.");
+    } else {
+      telegram_send_message(chat_id, "Failed to set LLM API key.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_stt_provider") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /set_stt_provider <groq|0>");
+      return true;
+    }
+    int provider = -1;
+    if (strcmp(args, "groq") == 0 || strcmp(args, "0") == 0) {
+      provider = MIMI_STT_PROVIDER_GROQ;
+    }
+    if (provider < 0) {
+      telegram_send_message(chat_id,
+                            "Invalid provider. Supported: groq (0)");
+      return true;
+    }
+    if (llm_stt_set_provider(provider) == ESP_OK) {
+      telegram_send_message(chat_id, "STT provider set to groq (0).");
+    } else {
+      telegram_send_message(chat_id, "Failed to set STT provider.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_stt_model") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /set_stt_model <model>");
+      return true;
+    }
+    if (llm_stt_set_model(args) == ESP_OK) {
+      telegram_send_message(chat_id, "STT model updated.");
+    } else {
+      telegram_send_message(chat_id, "Failed to set STT model.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_stt_base_url") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /set_stt_base_url <url>");
+      return true;
+    }
+    if (llm_stt_set_base_url(args) == ESP_OK) {
+      telegram_send_message(chat_id, "STT base URL updated.");
+    } else {
+      telegram_send_message(chat_id, "Failed to set STT base URL.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "set_stt_key") == 0) {
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /set_stt_key <key>");
+      return true;
+    }
+    if (llm_stt_set_key(args) == ESP_OK) {
+      telegram_send_message(chat_id, "STT API key updated.");
+    } else {
+      telegram_send_message(chat_id, "Failed to set STT API key.");
+    }
+    return true;
+  }
+
+  char buf[160];
+  snprintf(buf, sizeof(buf), "Unknown command: /%s\nUse /help.", cmd);
+  telegram_send_message(chat_id, buf);
+  return true;
+}
+
 static void process_updates(const char *json_str) {
   cJSON *root = cJSON_Parse(json_str);
   if (!root)
@@ -271,6 +675,11 @@ static void process_updates(const char *json_str) {
     cJSON *photo = cJSON_GetObjectItem(message, "photo");
     cJSON *voice = cJSON_GetObjectItem(message, "voice");
     cJSON *caption = cJSON_GetObjectItem(message, "caption");
+
+    if (text && cJSON_IsString(text) &&
+        handle_local_command(chat_id_str, cid, text->valuestring)) {
+      continue;
+    }
 
     if (photo && cJSON_IsArray(photo)) {
       /* Pick the largest photo (last element in array) */
@@ -375,6 +784,14 @@ esp_err_t telegram_bot_init(void) {
 }
 
 esp_err_t telegram_bot_start(void) {
+  if (s_bot_token[0]) {
+    if (telegram_sync_commands() == ESP_OK) {
+      ESP_LOGI(TAG, "Telegram commands synced");
+    } else {
+      ESP_LOGW(TAG, "Telegram commands sync failed (continuing)");
+    }
+  }
+
   BaseType_t ret =
       xTaskCreatePinnedToCore(telegram_poll_task, "tg_poll", MIMI_TG_POLL_STACK,
                               NULL, MIMI_TG_POLL_PRIO, NULL, MIMI_TG_POLL_CORE);

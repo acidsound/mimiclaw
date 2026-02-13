@@ -28,6 +28,8 @@
 - **nanobot**: `subagent.py` — SubagentManager spawns independent agent instances with isolated tool sets and system prompts, announces results back to main agent via system channel
 - **MimiClaw**: Not implemented
 - **Recommendation**: ESP32 memory is limited; simplify to a single background FreeRTOS task for long-running work, inject result into inbound queue on completion
+- [x] Design spec documented for Leader-Worker swarm orchestration: `docs/leader_worker_swarm_spec.md`
+- [ ] Implementation remains pending (leader queue/state machine, worker protocol, executor integration)
 
 ---
 

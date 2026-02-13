@@ -111,6 +111,17 @@ static void outbound_dispatch_task(void *arg) {
   }
 }
 
+static void start_network_services(void) {
+  ESP_ERROR_CHECK(telegram_bot_start());
+  ESP_ERROR_CHECK(agent_loop_start());
+  ESP_ERROR_CHECK(ws_server_start());
+
+  xTaskCreatePinnedToCore(outbound_dispatch_task, "outbound", MIMI_OUTBOUND_STACK,
+                          NULL, MIMI_OUTBOUND_PRIO, NULL, MIMI_OUTBOUND_CORE);
+
+  ESP_LOGI(TAG, "All services started!");
+}
+
 void app_main(void) {
   /* Silence noisy components */
   esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
@@ -148,32 +159,38 @@ void app_main(void) {
   /* Start Serial CLI first (works without WiFi) */
   ESP_ERROR_CHECK(serial_cli_init());
 
-  /* Start WiFi */
+  bool wifi_ready = false;
+
+  /* Start WiFi STA first */
   esp_err_t wifi_err = wifi_manager_start();
   if (wifi_err == ESP_OK) {
     ESP_LOGI(TAG, "Waiting for WiFi connection...");
     if (wifi_manager_wait_connected(30000) == ESP_OK) {
       ESP_LOGI(TAG, "WiFi connected: %s", wifi_manager_get_ip());
-
-      /* Start network-dependent services */
-      ESP_ERROR_CHECK(telegram_bot_start());
-      ESP_ERROR_CHECK(agent_loop_start());
-      ESP_ERROR_CHECK(ws_server_start());
-
-      /* Outbound dispatch task */
-      xTaskCreatePinnedToCore(outbound_dispatch_task, "outbound",
-                              MIMI_OUTBOUND_STACK, NULL, MIMI_OUTBOUND_PRIO,
-                              NULL, MIMI_OUTBOUND_CORE);
-
-      ESP_LOGI(TAG, "All services started!");
+      wifi_ready = true;
     } else {
-      ESP_LOGW(TAG, "WiFi connection timeout. Check MIMI_SECRET_WIFI_SSID in "
-                    "mimi_secrets.h");
+      ESP_LOGW(TAG,
+               "WiFi STA connect timeout. Starting provisioning portal...");
     }
   } else {
-    ESP_LOGW(
-        TAG,
-        "No WiFi credentials. Set MIMI_SECRET_WIFI_SSID in mimi_secrets.h");
+    ESP_LOGW(TAG,
+             "No WiFi credentials found. Starting provisioning portal...");
+  }
+
+  if (!wifi_ready) {
+    esp_err_t prov_err =
+        wifi_manager_run_provisioning_portal(MIMI_WIFI_PROV_TIMEOUT_MS);
+    if (prov_err == ESP_OK && wifi_manager_is_connected()) {
+      ESP_LOGI(TAG, "Provisioning successful. WiFi connected: %s",
+               wifi_manager_get_ip());
+      wifi_ready = true;
+    } else {
+      ESP_LOGW(TAG, "Provisioning not completed. Serial CLI remains available.");
+    }
+  }
+
+  if (wifi_ready) {
+    start_network_services();
   }
 
   ESP_LOGI(TAG, "MimiClaw ready. Type 'help' for CLI commands.");
