@@ -556,6 +556,54 @@ static int cmd_tg_auth_list(int argc, char **argv) {
   return 0;
 }
 
+/* --- tg_admin_add command --- */
+static struct {
+  struct arg_str *chat_id;
+  struct arg_end *end;
+} tg_admin_add_args;
+
+static int cmd_tg_admin_add(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&tg_admin_add_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, tg_admin_add_args.end, argv[0]);
+    return 1;
+  }
+  int64_t cid = atoll(tg_admin_add_args.chat_id->sval[0]);
+  if (telegram_admin_add(cid) == ESP_OK) {
+    printf("Chat %lld admin-added.\n", cid);
+    return 0;
+  }
+  printf("Failed to add admin chat %lld.\n", cid);
+  return 1;
+}
+
+/* --- tg_admin_remove command --- */
+static struct {
+  struct arg_str *chat_id;
+  struct arg_end *end;
+} tg_admin_remove_args;
+
+static int cmd_tg_admin_remove(int argc, char **argv) {
+  int nerrors = arg_parse(argc, argv, (void **)&tg_admin_remove_args);
+  if (nerrors != 0) {
+    arg_print_errors(stderr, tg_admin_remove_args.end, argv[0]);
+    return 1;
+  }
+  int64_t cid = atoll(tg_admin_remove_args.chat_id->sval[0]);
+  if (telegram_admin_remove(cid) == ESP_OK) {
+    printf("Chat %lld admin-removed.\n", cid);
+    return 0;
+  }
+  printf("Failed to remove admin chat %lld.\n", cid);
+  return 1;
+}
+
+/* --- tg_admin_list command --- */
+static int cmd_tg_admin_list(int argc, char **argv) {
+  telegram_admin_list();
+  return 0;
+}
+
 /* --- restart command --- */
 static int cmd_restart(int argc, char **argv) {
   printf("Restarting...\n");
@@ -1158,6 +1206,38 @@ esp_err_t serial_cli_init(void) {
       .func = &cmd_tg_auth_list,
   };
   esp_console_cmd_register(&tg_auth_list_cmd);
+
+  /* tg_admin_add */
+  tg_admin_add_args.chat_id =
+      arg_str1(NULL, NULL, "<chat_id>", "Telegram chat ID");
+  tg_admin_add_args.end = arg_end(1);
+  esp_console_cmd_t tg_admin_add_cmd = {
+      .command = "tg_admin_add",
+      .help = "Add Telegram admin chat",
+      .func = &cmd_tg_admin_add,
+      .argtable = &tg_admin_add_args,
+  };
+  esp_console_cmd_register(&tg_admin_add_cmd);
+
+  /* tg_admin_remove */
+  tg_admin_remove_args.chat_id =
+      arg_str1(NULL, NULL, "<chat_id>", "Telegram chat ID");
+  tg_admin_remove_args.end = arg_end(1);
+  esp_console_cmd_t tg_admin_remove_cmd = {
+      .command = "tg_admin_remove",
+      .help = "Remove Telegram admin chat",
+      .func = &cmd_tg_admin_remove,
+      .argtable = &tg_admin_remove_args,
+  };
+  esp_console_cmd_register(&tg_admin_remove_cmd);
+
+  /* tg_admin_list */
+  esp_console_cmd_t tg_admin_list_cmd = {
+      .command = "tg_admin_list",
+      .help = "Show Telegram admin configuration",
+      .func = &cmd_tg_admin_list,
+  };
+  esp_console_cmd_register(&tg_admin_list_cmd);
 
   /* tool_exec */
   tool_exec_args.name = arg_str1(NULL, NULL, "<name>", "Tool name");

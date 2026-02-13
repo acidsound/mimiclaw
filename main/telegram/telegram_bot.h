@@ -32,6 +32,9 @@ esp_err_t telegram_set_token(const char *token);
 esp_err_t telegram_auth_add(int64_t chat_id);
 esp_err_t telegram_auth_remove(int64_t chat_id);
 void telegram_auth_list(void);
+esp_err_t telegram_admin_add(int64_t chat_id);
+esp_err_t telegram_admin_remove(int64_t chat_id);
+void telegram_admin_list(void);
 
 typedef struct {
   char *path;     /* Heap-allocated; caller frees */

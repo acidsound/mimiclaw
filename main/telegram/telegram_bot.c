@@ -4,6 +4,7 @@
 #include "llm/llm_stt.h"
 #include "mimi_config.h"
 #include "proxy/http_proxy.h"
+#include "wifi/wifi_manager.h"
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -17,7 +18,7 @@
 #include <string.h>
 
 static const char *TAG = "telegram";
-static const int TELEGRAM_SEND_TIMEOUT_MS = 4000;
+static const int TELEGRAM_SEND_TIMEOUT_MS = 10000;
 
 static char s_bot_token[128] = MIMI_SECRET_TG_TOKEN;
 static int64_t s_update_offset = 0;
@@ -26,21 +27,50 @@ static int64_t s_update_offset = 0;
 #define MIMI_BREAK_GLASS_ADMIN_ID 0
 #endif
 
+static bool has_chat_flag(char prefix, int64_t chat_id) {
+  nvs_handle_t nvs;
+  if (nvs_open(MIMI_NVS_TG, NVS_READONLY, &nvs) != ESP_OK) {
+    return false;
+  }
+
+  char key[16];
+  snprintf(key, sizeof(key), "%c%" PRId64, prefix, chat_id);
+  uint8_t val = 0;
+  esp_err_t err = nvs_get_u8(nvs, key, &val);
+  nvs_close(nvs);
+  return (err == ESP_OK && val == 1);
+}
+
+static esp_err_t set_chat_flag(char prefix, int64_t chat_id, bool enabled) {
+  nvs_handle_t nvs;
+  if (nvs_open(MIMI_NVS_TG, NVS_READWRITE, &nvs) != ESP_OK) {
+    return ESP_FAIL;
+  }
+
+  char key[16];
+  snprintf(key, sizeof(key), "%c%" PRId64, prefix, chat_id);
+  if (enabled) {
+    nvs_set_u8(nvs, key, 1);
+  } else {
+    nvs_erase_key(nvs, key);
+  }
+  nvs_commit(nvs);
+  nvs_close(nvs);
+  return ESP_OK;
+}
+
+static bool is_chat_admin(int64_t chat_id) {
+  if (MIMI_BREAK_GLASS_ADMIN_ID != 0 && chat_id == MIMI_BREAK_GLASS_ADMIN_ID) {
+    return true;
+  }
+  return has_chat_flag('m', chat_id);
+}
+
 static bool is_chat_authorized(int64_t chat_id) {
-  if (chat_id == MIMI_BREAK_GLASS_ADMIN_ID)
+  if (is_chat_admin(chat_id))
     return true;
 
-  nvs_handle_t nvs;
-  if (nvs_open(MIMI_NVS_TG, NVS_READONLY, &nvs) == ESP_OK) {
-    char key[32];
-    snprintf(key, sizeof(key), "a%" PRId64, chat_id); // NVS keys max 15 chars
-    uint8_t val = 0;
-    esp_err_t err = nvs_get_u8(nvs, key, &val);
-    nvs_close(nvs);
-    if (err == ESP_OK && val == 1)
-      return true;
-  }
-  return false;
+  return has_chat_flag('a', chat_id);
 }
 
 /* HTTP response accumulator */
@@ -69,6 +99,15 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
     resp->buf[resp->len] = '\0';
   }
   return ESP_OK;
+}
+
+static void log_wifi_not_ready_throttled(void) {
+  static TickType_t s_last_warn = 0;
+  TickType_t now = xTaskGetTickCount();
+  if (s_last_warn == 0 || (now - s_last_warn) >= pdMS_TO_TICKS(15000)) {
+    ESP_LOGW(TAG, "WiFi not connected, Telegram API call skipped");
+    s_last_warn = now;
+  }
 }
 
 /* ── Proxy path: manual HTTP over CONNECT tunnel ────────────── */
@@ -188,7 +227,7 @@ static char *tg_api_call_direct(const char *method, const char *post_data,
   esp_http_client_cleanup(client);
 
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    ESP_LOGW(TAG, "HTTP request failed: %s", esp_err_to_name(err));
     free(resp.buf);
     return NULL;
   }
@@ -198,10 +237,29 @@ static char *tg_api_call_direct(const char *method, const char *post_data,
 
 static char *tg_api_call_with_timeout(const char *method, const char *post_data,
                                      int timeout_ms) {
-  if (http_proxy_is_enabled()) {
-    return tg_api_call_via_proxy(method, post_data, timeout_ms);
+  if (!wifi_manager_is_connected()) {
+    log_wifi_not_ready_throttled();
+    return NULL;
   }
-  return tg_api_call_direct(method, post_data, timeout_ms);
+
+  char *resp = NULL;
+  if (http_proxy_is_enabled()) {
+    resp = tg_api_call_via_proxy(method, post_data, timeout_ms);
+  } else {
+    resp = tg_api_call_direct(method, post_data, timeout_ms);
+  }
+
+  /* Short operations get one quick retry to survive transient link flaps. */
+  if (!resp && timeout_ms <= TELEGRAM_SEND_TIMEOUT_MS + 2000 &&
+      wifi_manager_is_connected()) {
+    vTaskDelay(pdMS_TO_TICKS(300));
+    if (http_proxy_is_enabled()) {
+      resp = tg_api_call_via_proxy(method, post_data, timeout_ms);
+    } else {
+      resp = tg_api_call_direct(method, post_data, timeout_ms);
+    }
+  }
+  return resp;
 }
 
 static char *tg_api_call(const char *method, const char *post_data) {
@@ -218,6 +276,10 @@ static esp_err_t telegram_sync_commands(void) {
       "{\"command\":\"commands\",\"description\":\"Alias of /help\"},"
       "{\"command\":\"whoami\",\"description\":\"Show your chat id\"},"
       "{\"command\":\"status\",\"description\":\"Show current status\"},"
+      "{\"command\":\"user_get\",\"description\":\"(Admin) Show USER.md\"},"
+      "{\"command\":\"user_set\",\"description\":\"(Admin) Set USER.md\"},"
+      "{\"command\":\"soul_get\",\"description\":\"(Admin) Show SOUL.md\"},"
+      "{\"command\":\"soul_set\",\"description\":\"(Admin) Set SOUL.md\"},"
       "{\"command\":\"pf_ls\",\"description\":\"List LLM profiles\"},"
       "{\"command\":\"pf_use\",\"description\":\"Switch LLM profile\"},"
       "{\"command\":\"pf_rm\",\"description\":\"Delete LLM profile\"},"
@@ -337,6 +399,80 @@ static void send_profile_list_message(const char *chat_id) {
   telegram_send_message(chat_id, msg);
 }
 
+static bool require_admin_for_command(const char *chat_id, int64_t cid,
+                                      const char *cmd) {
+  if (is_chat_admin(cid)) {
+    return true;
+  }
+
+  char msg[192];
+  snprintf(msg, sizeof(msg), "Command /%s is admin-only.", cmd);
+  telegram_send_message(chat_id, msg);
+  return false;
+}
+
+static esp_err_t write_text_file(const char *path, const char *content) {
+  if (!path || !content) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  FILE *f = fopen(path, "w");
+  if (!f) {
+    return ESP_FAIL;
+  }
+
+  size_t len = strlen(content);
+  size_t written = fwrite(content, 1, len, f);
+  fclose(f);
+  return (written == len) ? ESP_OK : ESP_FAIL;
+}
+
+static void send_file_snapshot(const char *chat_id, const char *path,
+                               const char *title) {
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "%s not found.", title);
+    telegram_send_message(chat_id, msg);
+    return;
+  }
+
+  size_t data_cap = 4096;
+  char *data = malloc(data_cap + 1);
+  if (!data) {
+    fclose(f);
+    telegram_send_message(chat_id, "Out of memory while reading file.");
+    return;
+  }
+
+  size_t n = fread(data, 1, data_cap, f);
+  bool truncated = !feof(f);
+  data[n] = '\0';
+  fclose(f);
+
+  if (n == 0) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "%s is empty.", title);
+    free(data);
+    telegram_send_message(chat_id, msg);
+    return;
+  }
+
+  const char *suffix = truncated ? "\n\n[truncated to 4KB]" : "";
+  size_t out_cap = strlen(title) + n + strlen(suffix) + 16;
+  char *out = malloc(out_cap);
+  if (!out) {
+    free(data);
+    telegram_send_message(chat_id, "Out of memory while preparing response.");
+    return;
+  }
+
+  snprintf(out, out_cap, "=== %s ===\n%s%s", title, data, suffix);
+  telegram_send_message(chat_id, out);
+  free(out);
+  free(data);
+}
+
 static bool handle_local_command(const char *chat_id, int64_t cid,
                                  const char *text) {
   char cmd[32];
@@ -355,6 +491,10 @@ static bool handle_local_command(const char *chat_id, int64_t cid,
         "/commands - Alias of /help\n"
         "/whoami - Show your sender chat id\n"
         "/status - Show system status\n"
+        "/user_get - (Admin) show USER.md\n"
+        "/user_set <text> - (Admin) overwrite USER.md\n"
+        "/soul_get - (Admin) show SOUL.md\n"
+        "/soul_set <text> - (Admin) overwrite SOUL.md\n"
         "/pf_ls - List LLM profiles\n"
         "/pf_use <name> - Switch active profile\n"
         "/pf_rm <name> - Delete profile (default blocked)\n"
@@ -367,7 +507,12 @@ static bool handle_local_command(const char *chat_id, int64_t cid,
         "/set_stt_model <model> - Set STT model\n"
         "/set_stt_base_url <url> - Set STT base URL\n"
         "/set_stt_key <key> - Set STT API key\n\n"
+        "Admin setup: use serial CLI `tg_admin_add <chat_id>` first.\n\n"
         "Usage examples:\n"
+        "/user_get\n"
+        "/user_set Name: Alice\\nLang: ko\\nTone: concise\n"
+        "/soul_get\n"
+        "/soul_set You are practical and concise.\n"
         "/pf_use prod\n"
         "/set_provider anthropic\n"
         "/set_model claude-3-5-sonnet-20241022\n"
@@ -399,6 +544,56 @@ static bool handle_local_command(const char *chat_id, int64_t cid,
              (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              s_update_offset);
     telegram_send_message(chat_id, buf);
+    return true;
+  }
+
+  if (strcmp(cmd, "user_get") == 0) {
+    if (!require_admin_for_command(chat_id, cid, cmd)) {
+      return true;
+    }
+    send_file_snapshot(chat_id, MIMI_USER_FILE, "USER.md");
+    return true;
+  }
+
+  if (strcmp(cmd, "soul_get") == 0) {
+    if (!require_admin_for_command(chat_id, cid, cmd)) {
+      return true;
+    }
+    send_file_snapshot(chat_id, MIMI_SOUL_FILE, "SOUL.md");
+    return true;
+  }
+
+  if (strcmp(cmd, "user_set") == 0) {
+    if (!require_admin_for_command(chat_id, cid, cmd)) {
+      return true;
+    }
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /user_set <text>");
+      return true;
+    }
+    if (write_text_file(MIMI_USER_FILE, args) == ESP_OK) {
+      telegram_send_message(chat_id, "USER.md updated.");
+    } else {
+      telegram_send_message(chat_id, "Failed to update USER.md.");
+    }
+    return true;
+  }
+
+  if (strcmp(cmd, "soul_set") == 0) {
+    if (!require_admin_for_command(chat_id, cid, cmd)) {
+      return true;
+    }
+    args = skip_spaces(args);
+    if (!args || args[0] == '\0') {
+      telegram_send_message(chat_id, "Usage: /soul_set <text>");
+      return true;
+    }
+    if (write_text_file(MIMI_SOUL_FILE, args) == ESP_OK) {
+      telegram_send_message(chat_id, "SOUL.md updated.");
+    } else {
+      telegram_send_message(chat_id, "Failed to update SOUL.md.");
+    }
     return true;
   }
 
@@ -929,36 +1124,51 @@ esp_err_t telegram_set_token(const char *token) {
 }
 
 esp_err_t telegram_auth_add(int64_t chat_id) {
-  nvs_handle_t nvs;
-  if (nvs_open(MIMI_NVS_TG, NVS_READWRITE, &nvs) != ESP_OK)
-    return ESP_FAIL;
-  char key[16];
-  snprintf(key, sizeof(key), "a%" PRId64, chat_id);
-  nvs_set_u8(nvs, key, 1);
-  nvs_commit(nvs);
-  nvs_close(nvs);
+  esp_err_t err = set_chat_flag('a', chat_id, true);
+  if (err != ESP_OK)
+    return err;
   ESP_LOGI(TAG, "Authorized chat %" PRId64, chat_id);
   return ESP_OK;
 }
 
 esp_err_t telegram_auth_remove(int64_t chat_id) {
-  nvs_handle_t nvs;
-  if (nvs_open(MIMI_NVS_TG, NVS_READWRITE, &nvs) != ESP_OK)
-    return ESP_FAIL;
-  char key[16];
-  snprintf(key, sizeof(key), "a%" PRId64, chat_id);
-  nvs_erase_key(nvs, key);
-  nvs_commit(nvs);
-  nvs_close(nvs);
+  esp_err_t err = set_chat_flag('a', chat_id, false);
+  if (err != ESP_OK)
+    return err;
   ESP_LOGI(TAG, "Deauthorized chat %" PRId64, chat_id);
   return ESP_OK;
 }
 
 void telegram_auth_list(void) {
-  printf("Authorized Telegram Chats (NVS):\n");
-  /* Simple list via iterator if supported, or just print break-glass */
-  printf("  [Static] Break-glass Admin: %" PRId64 "\n",
-         (int64_t)MIMI_BREAK_GLASS_ADMIN_ID);
+  printf("Authorized Telegram Chats:\n");
+  printf("  - CLI list is not enumerated; use tg_auth_add/remove for management.\n");
+}
+
+esp_err_t telegram_admin_add(int64_t chat_id) {
+  esp_err_t err = set_chat_flag('m', chat_id, true);
+  if (err != ESP_OK)
+    return err;
+  ESP_LOGI(TAG, "Admin chat added %" PRId64, chat_id);
+  return ESP_OK;
+}
+
+esp_err_t telegram_admin_remove(int64_t chat_id) {
+  esp_err_t err = set_chat_flag('m', chat_id, false);
+  if (err != ESP_OK)
+    return err;
+  ESP_LOGI(TAG, "Admin chat removed %" PRId64, chat_id);
+  return ESP_OK;
+}
+
+void telegram_admin_list(void) {
+  printf("Telegram Admin Source:\n");
+  if (MIMI_BREAK_GLASS_ADMIN_ID != 0) {
+    printf("  - break_glass_admin: %" PRId64 "\n",
+           (int64_t)MIMI_BREAK_GLASS_ADMIN_ID);
+  } else {
+    printf("  - break_glass_admin: (not set)\n");
+  }
+  printf("  - NVS admins are enabled (managed by tg_admin_add/remove).\n");
 }
 
 typedef struct {

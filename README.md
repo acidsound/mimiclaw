@@ -136,6 +136,9 @@ mimi> set_media_limits 1024 400 10 # 기본 제약(사진KB/음성KB/초)
 mimi> tg_auth_add 12345            # 텔레그램 사용자 권한 부여 (chat_id)
 mimi> tg_auth_remove 12345         # 권한 제거
 mimi> tg_auth_list                 # 권한 부여된 목록 확인
+mimi> tg_admin_add 12345           # 텔레그램 관리자 권한 부여 (NVS)
+mimi> tg_admin_remove 12345        # 관리자 권한 제거
+mimi> tg_admin_list                # 관리자 구성 확인 (NVS + break-glass)
 mimi> config_show                  # 모든 설정 확인 (마스킹 처리됨)
 mimi> config_reset                 # NVS 초기화 및 빌드 타임 기본값으로 복구
 ```
@@ -190,15 +193,19 @@ mimi> restart
 ```bash
 mimi> tg_auth_add <chat_id>
 mimi> tg_auth_list
+mimi> tg_admin_add <chat_id>   # 관리자 명령을 쓸 chat_id 지정
 ```
 
 6) **텔레그램에서 `/help`로 명령어 확인**
 - `/help`, `/start`, `/commands`, `/whoami`, `/status`
+- `/user_get`, `/user_set <text>`, `/soul_get`, `/soul_set <text>` (관리자 전용)
 - `/pf_ls`, `/pf_use <name>`, `/pf_rm <name>` (`/pf_del` 별칭)
 - `/set_provider <anthropic|openai|0|1>`
 - `/set_model <model>`, `/set_base_url <url>`, `/set_api_key <key>`
 - `/set_stt_provider <groq|0>`, `/set_stt_model <model>`
 - `/set_stt_base_url <url>`, `/set_stt_key <key>`
+
+> 관리자 전용 명령은 `tg_admin_add`로 등록된 chat_id(또는 선택적 `MIMI_BREAK_GLASS_ADMIN_ID`)에서만 실행됩니다.
 
 ## 보안 및 저장소
 

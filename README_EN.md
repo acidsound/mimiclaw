@@ -136,6 +136,9 @@ mimi> set_media_limits 1024 400 10 # photo KB / voice KB / max seconds
 mimi> tg_auth_add 12345            # authorize a Telegram user (chat_id)
 mimi> tg_auth_remove 12345         # deauthorize a user
 mimi> tg_auth_list                 # list authorized users
+mimi> tg_admin_add 12345           # grant Telegram admin role (NVS)
+mimi> tg_admin_remove 12345        # revoke Telegram admin role
+mimi> tg_admin_list                # show admin config (NVS + break-glass)
 mimi> config_show                  # show all config (masked)
 mimi> config_reset                 # clear NVS, revert to build-time defaults
 ```
@@ -175,9 +178,20 @@ mimi> restart
 ```bash
 mimi> tg_auth_add <chat_id>
 mimi> tg_auth_list
+mimi> tg_admin_add <chat_id>   # set which chat can run admin-only commands
 ```
 
-6. In Telegram, run `/help` to verify command routing.
+6. In Telegram, run `/help` and verify command routing.
+- `/help`, `/start`, `/commands`, `/whoami`, `/status`
+- `/user_get`, `/user_set <text>`, `/soul_get`, `/soul_set <text>` (admin-only)
+- `/pf_ls`, `/pf_use <name>`, `/pf_rm <name>` (`/pf_del` alias)
+- `/set_provider <anthropic|openai|0|1>`
+- `/set_model <model>`, `/set_base_url <url>`, `/set_api_key <key>`
+- `/set_stt_provider <groq|0>`, `/set_stt_model <model>`
+- `/set_stt_base_url <url>`, `/set_stt_key <key>`
+
+> Admin-only commands can run only from chat IDs added via `tg_admin_add`
+> (or optional `MIMI_BREAK_GLASS_ADMIN_ID`).
 
 **Debug & maintenance:**
 

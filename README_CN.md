@@ -149,6 +149,12 @@ mimi> set_stt_key gsk_...           # 设置 STT API Key
 mimi> set_stt_model whisper-large-v3
 mimi> set_media_limits 1024 400 10   # 图片KB/语音KB/秒数
 mimi> config_show                  # 查看所有配置（脱敏显示）
+mimi> tg_auth_add 12345            # 允许 Telegram 用户(chat_id)
+mimi> tg_auth_remove 12345         # 取消允许
+mimi> tg_auth_list                 # 查看允许列表
+mimi> tg_admin_add 12345           # 设置 Telegram 管理员(chat_id, NVS)
+mimi> tg_admin_remove 12345        # 移除管理员
+mimi> tg_admin_list                # 查看管理员配置（NVS + break-glass）
 mimi> config_reset                 # 清除 NVS，恢复编译时默认值
 ```
 
@@ -187,9 +193,20 @@ mimi> restart
 ```bash
 mimi> tg_auth_add <chat_id>
 mimi> tg_auth_list
+mimi> tg_admin_add <chat_id>   # 指定可执行管理员命令的 chat_id
 ```
 
-6. 在 Telegram 里发送 `/help`，确认命令路由正常。
+6. 在 Telegram 里发送 `/help`，并确认命令路由正常。
+- `/help`, `/start`, `/commands`, `/whoami`, `/status`
+- `/user_get`, `/user_set <text>`, `/soul_get`, `/soul_set <text>`（仅管理员）
+- `/pf_ls`, `/pf_use <name>`, `/pf_rm <name>`（`/pf_del` 别名）
+- `/set_provider <anthropic|openai|0|1>`
+- `/set_model <model>`, `/set_base_url <url>`, `/set_api_key <key>`
+- `/set_stt_provider <groq|0>`, `/set_stt_model <model>`
+- `/set_stt_base_url <url>`, `/set_stt_key <key>`
+
+> 仅管理员命令只能由 `tg_admin_add` 注册的 chat_id 执行
+>（或可选 `MIMI_BREAK_GLASS_ADMIN_ID`）。
 
 **调试与运维：**
 
