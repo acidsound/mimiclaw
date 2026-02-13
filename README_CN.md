@@ -174,7 +174,7 @@ MimiClaw 把所有数据存为纯文本文件，可以直接读取和编辑：
 | `SOUL.md` | 机器人的人设 — 编辑它来改变行为方式 |
 | `USER.md` | 关于你的信息 — 姓名、偏好、语言 |
 | `MEMORY.md` | 长期记忆 — 它应该一直记住的事 |
-| `2026-02-05.md` | 每日笔记 — 今天发生了什么 |
+| `wol_devices.json` | WOL 设备注册表（`label`,`name`,`ip`,`hostname`,`mac`） |
 | `tg_12345.jsonl` | 聊天记录 — 你和它的对话 |
 
 ## 工具
@@ -184,6 +184,10 @@ MimiClaw 使用 Anthropic 的 tool use 协议 — Claude 在对话中可以调�
 | 工具 | 说明 |
 |------|------|
 | `web_search` | 通过 Brave Search API 搜索网页，获取实时信息 |
+| `http_request` | 安全的 GET/POST 请求（含 SSRF 防护与密钥替换） |
+| `wake_on_lan` | 发送 Wake-on-LAN 魔法包，可基于 mac 或 `list_devices` 中的 label/hostname/ip |
+| `list_devices` | 通过后台 ICMP 子网扫描返回设备列表 |
+| `wol_register` | 使用 `mac` 注册/更新 WOL 目标，支持可选 `label`、`hostname`、`ip` |
 | `get_current_time` | 通过 HTTP 获取当前日期和时间，并设置系统时钟 |
 
 启用网页搜索需要在 `mimi_secrets.h` 中设置 [Brave Search API key](https://brave.com/search/api/)（`MIMI_SECRET_SEARCH_KEY`）。
