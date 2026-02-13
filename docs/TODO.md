@@ -53,6 +53,16 @@
 - **MimiClaw**: Only processes `message.text`, ignores all media messages
 - **Recommendation**: Images can be base64-encoded for Claude Vision; voice requires Whisper API (extra HTTPS request)
 
+### [ ] Image Generation Relay (Vercel / Hugging Face)
+- **Problem**: ESP32-S3 RAM budget is too small for large `b64_json` image responses (JSON parse + base64 decode buffers).
+- **Approach**: Use a lightweight relay server (Vercel or Hugging Face) to:
+  1. call image model API,
+  2. send image to Telegram (`sendPhoto`),
+  3. return only `file_id`/message metadata to device.
+- **Data policy**: Delete temporary image bytes on relay immediately after Telegram upload succeeds and `file_id` is captured.
+- **MimiClaw side**: Keep protocol minimal (`prompt` request → `file_id` result), no raw image payload handling on-device.
+- **Spec**: `docs/image-relay-spec.md`
+
 ### [ ] Skills System (pluggable capabilities)
 - **nanobot**: `agent/skills.py` — loads skills from SKILL.md files, supports always-loaded and on-demand, frontmatter metadata, requirements checking
 - **MimiClaw**: Not implemented

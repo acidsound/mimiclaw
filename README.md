@@ -321,3 +321,11 @@ MIT
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=memovai/mimiclaw&type=Date)](https://star-history.com/#memovai/mimiclaw&Date)
+
+## 향후 계획 (Image Relay)
+
+ESP32-S3 메모리 제약으로 이미지 `b64_json`을 디바이스에서 직접 처리하는 방식은 리스크가 큽니다.  
+대신 Relay 서버(Vercel/Hugging Face)가 이미지 생성과 Telegram 업로드를 처리하고, 디바이스는 `file_id`/상태만 수신하는 구조를 채택할 예정입니다.
+
+- 설계 문서: `docs/image-relay-spec.md`
+- 트래킹 항목: `docs/TODO.md`의 `Image Generation Relay (Vercel / Hugging Face)`
