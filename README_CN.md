@@ -74,11 +74,11 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 ```c
 #define MIMI_SECRET_WIFI_SSID       "你的WiFi名"
 #define MIMI_SECRET_WIFI_PASS       "你的WiFi密码"
-#define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+#define MIMI_SECRET_TG_TOKEN        "<YOUR_TELEGRAM_BOT_TOKEN>" // 格式：<bot_id>:<bot_token>（必须包含冒号）
 
 /* 选择提供商: MIMI_LLM_PROVIDER_ANTHROPIC 或 MIMI_LLM_PROVIDER_OPENAI */
 #define MIMI_SECRET_PROVIDER        MIMI_LLM_PROVIDER_ANTHROPIC 
-#define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
+#define MIMI_SECRET_API_KEY         "<YOUR_LLM_API_KEY>"        // 格式：provider key（例如 sk-ant-...）
 #define MIMI_SECRET_BASE_URL        "https://api.anthropic.com/v1/messages" // 或 https://api.moonshot.cn/v1/chat/completions
 
 #define MIMI_SECRET_SEARCH_KEY      ""              // 可选：Brave Search API key
@@ -132,7 +132,7 @@ mimi> clear_proxy                    # 清除代理
 mimi> wifi_set MySSID MyPassword   # 换 WiFi
 mimi> wifi_reset                   # 重置 WiFi 凭据（清 NVS + 禁用编译时回退）
 mimi> wifi_portal 600              # 启动 SoftAP 配网门户（单位：秒）
-mimi> set_tg_token 123456:ABC...   # 换 Telegram Bot Token
+mimi> set_tg_token <YOUR_TELEGRAM_BOT_TOKEN>   # 换 Telegram Bot Token
 
 # LLM 配置
 mimi> set_provider kimi            # 切换到 Kimi (Moonshot AI)
@@ -185,7 +185,7 @@ mimi> wifi_portal 600
 
 4. 设置 Telegram token：
 ```bash
-mimi> set_tg_token 123456:ABC...
+mimi> set_tg_token <YOUR_TELEGRAM_BOT_TOKEN>
 mimi> restart
 ```
 

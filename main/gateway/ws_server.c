@@ -1,6 +1,7 @@
 #include "ws_server.h"
 #include "mimi_config.h"
 #include "bus/message_bus.h"
+#include "gateway/ui_bridge.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -67,6 +68,34 @@ static void remove_client(int fd)
     }
 }
 
+static esp_err_t ws_send_json_to_client(ws_client_t *client, cJSON *obj)
+{
+    if (!client || !obj || !s_server) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char *json_str = cJSON_PrintUnformatted(obj);
+    if (!json_str) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    httpd_ws_frame_t ws_pkt = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t *)json_str,
+        .len = strlen(json_str),
+    };
+
+    esp_err_t ret = httpd_ws_send_frame_async(s_server, client->fd, &ws_pkt);
+    free(json_str);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send to %s: %s", client->chat_id, esp_err_to_name(ret));
+        remove_client(client->fd);
+    }
+
+    return ret;
+}
+
 static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -109,20 +138,25 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
     cJSON *type = cJSON_GetObjectItem(root, "type");
     cJSON *content = cJSON_GetObjectItem(root, "content");
+    bool consumed_by_bridge = false;
 
-    if (type && cJSON_IsString(type) && strcmp(type->valuestring, "message") == 0
-        && content && cJSON_IsString(content)) {
-
-        /* Determine chat_id */
-        const char *chat_id = client ? client->chat_id : "ws_unknown";
-        cJSON *cid = cJSON_GetObjectItem(root, "chat_id");
-        if (cid && cJSON_IsString(cid)) {
-            chat_id = cid->valuestring;
-            /* Update client's chat_id if provided */
-            if (client) {
-                strncpy(client->chat_id, chat_id, sizeof(client->chat_id) - 1);
-            }
+    /* Determine chat_id (optional override) */
+    const char *chat_id = client ? client->chat_id : "ws_unknown";
+    cJSON *cid = cJSON_GetObjectItem(root, "chat_id");
+    if (cid && cJSON_IsString(cid)) {
+        chat_id = cid->valuestring;
+        if (client) {
+            strncpy(client->chat_id, chat_id, sizeof(client->chat_id) - 1);
         }
+    }
+
+    if (type && cJSON_IsString(type)) {
+        consumed_by_bridge = ui_bridge_handle_ws_event(chat_id, root);
+    }
+
+    if (!consumed_by_bridge &&
+        type && cJSON_IsString(type) && strcmp(type->valuestring, "message") == 0
+        && content && cJSON_IsString(content)) {
 
         ESP_LOGI(TAG, "WS message from %s: %.40s...", chat_id, content->valuestring);
 
@@ -178,32 +212,54 @@ esp_err_t ws_server_send(const char *chat_id, const char *text)
         return ESP_ERR_NOT_FOUND;
     }
 
-    /* Build response JSON */
     cJSON *resp = cJSON_CreateObject();
+    if (!resp) {
+        return ESP_ERR_NO_MEM;
+    }
     cJSON_AddStringToObject(resp, "type", "response");
-    cJSON_AddStringToObject(resp, "content", text);
+    cJSON_AddStringToObject(resp, "content", text ? text : "");
     cJSON_AddStringToObject(resp, "chat_id", chat_id);
-
-    char *json_str = cJSON_PrintUnformatted(resp);
+    esp_err_t ret = ws_send_json_to_client(client, resp);
     cJSON_Delete(resp);
+    return ret;
+}
 
-    if (!json_str) return ESP_ERR_NO_MEM;
+esp_err_t ws_server_send_event(const char *chat_id, const char *type,
+                               const char *payload_json)
+{
+    if (!chat_id || !type) return ESP_ERR_INVALID_ARG;
+    if (!s_server) return ESP_ERR_INVALID_STATE;
 
-    httpd_ws_frame_t ws_pkt = {
-        .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)json_str,
-        .len = strlen(json_str),
-    };
-
-    esp_err_t ret = httpd_ws_send_frame_async(s_server, client->fd, &ws_pkt);
-    free(json_str);
-
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to send to %s: %s", chat_id, esp_err_to_name(ret));
-        remove_client(client->fd);
+    ws_client_t *client = find_client_by_chat_id(chat_id);
+    if (!client) {
+        ESP_LOGW(TAG, "No WS client with chat_id=%s", chat_id);
+        return ESP_ERR_NOT_FOUND;
     }
 
+    cJSON *evt = cJSON_CreateObject();
+    if (!evt) {
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddStringToObject(evt, "type", type);
+    cJSON_AddStringToObject(evt, "chat_id", chat_id);
+
+    if (payload_json && payload_json[0] != '\0') {
+        cJSON *payload = cJSON_Parse(payload_json);
+        if (payload) {
+            cJSON_AddItemToObject(evt, "payload", payload);
+        } else {
+            cJSON_AddStringToObject(evt, "payload_text", payload_json);
+        }
+    }
+
+    esp_err_t ret = ws_send_json_to_client(client, evt);
+    cJSON_Delete(evt);
     return ret;
+}
+
+bool ws_server_is_started(void)
+{
+    return s_server != NULL;
 }
 
 esp_err_t ws_server_stop(void)

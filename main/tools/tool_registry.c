@@ -4,6 +4,7 @@
 #include "tools/tool_memory.h"
 #include "tools/tool_system.h"
 #include "tools/tool_stt.h"
+#include "tools/tool_ui.h"
 #include "tools/tool_web_search.h"
 
 #include "cJSON.h"
@@ -21,7 +22,7 @@ extern esp_err_t tool_wol_register_execute(const char *, char *, size_t);
 
 static const char *TAG = "tools";
 
-#define MAX_TOOLS 17
+#define MAX_TOOLS 20
 
 static mimi_tool_t s_tools[MAX_TOOLS];
 static int s_tool_count = 0;
@@ -351,6 +352,89 @@ esp_err_t tool_registry_init(void) {
       .execute = tool_memory_append_execute,
   };
   register_tool(&ma);
+
+  /* Register ui_capture */
+  mimi_tool_t ui_cap = {
+      .name = "ui_capture",
+      .description = "Request a fresh screen capture from a connected "
+                     "WebSocket helper and wait for result. Returns metadata "
+                     "for the captured frame.",
+      .input_schema_json =
+          "{\"type\":\"object\","
+          "\"properties\":{"
+          "\"chat_id\":{\"type\":\"string\",\"description\":\"WebSocket client "
+          "chat_id to request capture from\"},"
+          "\"goal\":{\"type\":\"string\",\"description\":\"Optional hint "
+          "describing what to focus on\"},"
+          "\"timeout_ms\":{\"type\":\"integer\",\"description\":\"Wait timeout "
+          "in milliseconds\"},"
+          "\"max_width\":{\"type\":\"integer\",\"description\":\"Requested max "
+          "capture width (pixels)\"},"
+          "\"jpeg_quality\":{\"type\":\"integer\",\"description\":\"Requested "
+          "JPEG quality (30-95)\"}"
+          "},\"required\":[]}",
+      .execute = tool_ui_capture_execute,
+  };
+  register_tool(&ui_cap);
+
+  mimi_tool_t ui_action = {
+      .name = "ui_action",
+      .description = "Send a single UI input action to connected WebSocket "
+                     "helper (tap/swipe/key/type).",
+      .input_schema_json =
+          "{\"type\":\"object\","
+          "\"properties\":{"
+          "\"chat_id\":{\"type\":\"string\",\"description\":\"WebSocket client "
+          "chat_id\"},"
+          "\"action\":{\"type\":\"string\",\"description\":\"Action type such as "
+          "tap, swipe, type, key\"},"
+          "\"x_norm\":{\"type\":\"number\",\"description\":\"Primary x in "
+          "normalized [0,1]\"},"
+          "\"y_norm\":{\"type\":\"number\",\"description\":\"Primary y in "
+          "normalized [0,1]\"},"
+          "\"x2_norm\":{\"type\":\"number\",\"description\":\"Secondary x for "
+          "swipe/drag\"},"
+          "\"y2_norm\":{\"type\":\"number\",\"description\":\"Secondary y for "
+          "swipe/drag\"},"
+          "\"text\":{\"type\":\"string\",\"description\":\"Text payload for type "
+          "action\"},"
+          "\"key\":{\"type\":\"string\",\"description\":\"Key payload for key "
+          "action\"},"
+          "\"confidence\":{\"type\":\"number\",\"description\":\"Optional model "
+          "confidence\"},"
+          "\"reason\":{\"type\":\"string\",\"description\":\"Optional reason for "
+          "traceability\"}"
+          "},\"required\":[\"action\"]}",
+      .execute = tool_ui_action_execute,
+  };
+  register_tool(&ui_action);
+
+  mimi_tool_t ios_sim_capture = {
+      .name = "ios_sim_capture_to_telegram",
+      .description = "Ask iOS simulator helper to open a URL, tap, wait, "
+                     "capture screen, and send screenshot to Telegram. Returns "
+                     "Telegram file_id.",
+      .input_schema_json =
+          "{\"type\":\"object\","
+          "\"properties\":{"
+          "\"chat_id\":{\"type\":\"string\",\"description\":\"WebSocket helper "
+          "chat_id\"},"
+          "\"tg_chat_id\":{\"type\":\"string\",\"description\":\"Destination "
+          "Telegram chat id\"},"
+          "\"url\":{\"type\":\"string\",\"description\":\"URL to open in iOS "
+          "simulator Safari\"},"
+          "\"tap_mode\":{\"type\":\"string\",\"enum\":[\"center\",\"none\"],"
+          "\"description\":\"Tap behavior before final screenshot\"},"
+          "\"open_wait_ms\":{\"type\":\"integer\",\"description\":\"Delay after "
+          "opening URL before tap\"},"
+          "\"wait_after_tap_ms\":{\"type\":\"integer\",\"description\":\"Delay "
+          "after tap before screenshot\"},"
+          "\"timeout_ms\":{\"type\":\"integer\",\"description\":\"Total wait "
+          "timeout for helper result\"}"
+          "},\"required\":[\"url\"]}",
+      .execute = tool_ios_sim_capture_to_telegram_execute,
+  };
+  register_tool(&ios_sim_capture);
 
   build_tools_json();
 

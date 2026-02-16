@@ -14,6 +14,7 @@
 #include "bus/message_bus.h"
 #include "cli/serial_cli.h"
 #include "gateway/ws_server.h"
+#include "gateway/ui_bridge.h"
 #include "llm/llm_proxy.h"
 #include "memory/memory_store.h"
 #include "memory/session_mgr.h"
@@ -29,6 +30,13 @@
 #include <sys/stat.h>
 
 static const char *TAG = "mimi";
+
+static void restart_after_wifi_fail(const char *reason) {
+  ESP_LOGE(TAG, "WiFi recovery restart: %s (delay=%dms)", reason,
+           MIMI_WIFI_RESTART_DELAY_MS);
+  vTaskDelay(pdMS_TO_TICKS(MIMI_WIFI_RESTART_DELAY_MS));
+  esp_restart();
+}
 
 static void migrate_spiffs_files(void) {
   const char *safe_files[] = {"MEMORY.md", "SOUL.md", "USER.md"};
@@ -122,6 +130,18 @@ static void start_network_services(void) {
   ESP_LOGI(TAG, "All services started!");
 }
 
+static void wifi_fail_watchdog_task(void *arg) {
+  EventGroupHandle_t wifi_events = wifi_manager_get_event_group();
+  while (1) {
+    xEventGroupWaitBits(wifi_events, WIFI_FAIL_BIT, pdTRUE, pdFALSE,
+                        portMAX_DELAY);
+    if (wifi_manager_is_connected()) {
+      continue;
+    }
+    restart_after_wifi_fail("reconnect retries exhausted");
+  }
+}
+
 void app_main(void) {
   /* Silence noisy components */
   esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
@@ -148,6 +168,7 @@ void app_main(void) {
   ESP_ERROR_CHECK(session_mgr_init());
   ESP_ERROR_CHECK(wifi_manager_init());
   ESP_ERROR_CHECK(http_proxy_init());
+  ESP_ERROR_CHECK(ui_bridge_init());
   ESP_ERROR_CHECK(telegram_bot_init());
   ESP_ERROR_CHECK(llm_proxy_init());
   ESP_ERROR_CHECK(tool_registry_init());
@@ -191,6 +212,14 @@ void app_main(void) {
 
   if (wifi_ready) {
     start_network_services();
+#if MIMI_WIFI_AUTO_RESTART_ON_FAIL
+    xTaskCreatePinnedToCore(wifi_fail_watchdog_task, "wifi_fail_wd", 3072, NULL,
+                            MIMI_OUTBOUND_PRIO, NULL, MIMI_OUTBOUND_CORE);
+#endif
+  } else if (wifi_err == ESP_OK) {
+#if MIMI_WIFI_AUTO_RESTART_ON_FAIL
+    restart_after_wifi_fail("initial WiFi bring-up failed");
+#endif
   }
 
   ESP_LOGI(TAG, "MimiClaw ready. Type 'help' for CLI commands.");

@@ -6,6 +6,7 @@
 #include "memory/session_mgr.h"
 #include "mimi_config.h"
 #include "media/media_limits.h"
+#include "gateway/ui_bridge.h"
 #include "telegram/telegram_bot.h"
 #include "tools/tool_registry.h"
 
@@ -47,6 +48,8 @@ static bool contains_ci_token(const char *haystack, const char *token);
 static bool extract_mac_from_text(const char *text, char *out, size_t out_size);
 static bool is_unknown_or_empty(const char *s);
 static bool contains_ci_token_bounded(const char *haystack, const char *token);
+static bool contains_any_ci_token(const char *text, const char *const *tokens,
+                                  size_t token_count);
 static bool wol_call_has_selector(const char *input_json);
 static bool infer_wol_selector_from_msg(const char *message, char *selector,
                                        size_t selector_size);
@@ -54,11 +57,23 @@ static bool infer_wol_tool_input_from_message(const char *message,
                                              char *out_input,
                                              size_t out_input_size);
 static bool has_wol_intent_keyword(const char *text);
+static bool extract_first_http_url(const char *text, char *out, size_t out_size);
+static int infer_wait_after_tap_ms_from_text(const char *text);
+static bool has_ios_sim_capture_intent(const char *text);
+static bool try_fastpath_ios_sim_capture(const mimi_msg_t *msg, char *tool_output,
+                                         size_t tool_output_size,
+                                         char *tool_usage_summary,
+                                         size_t tool_usage_summary_size);
 static const char *normalize_tool_name_for_exec(const char *input_name,
                                               char *out_name,
                                               size_t out_name_size);
 static bool enforce_photo_limit(const mimi_msg_t *msg, size_t file_size);
 static bool enforce_voice_limit(const mimi_msg_t *msg, size_t file_size);
+static bool inject_ui_tool_chat_id(const mimi_msg_t *msg, const char *tool_name,
+                                   const char *raw_input, char *out_input,
+                                   size_t out_input_size);
+static void append_ui_capture_message(cJSON *messages, char **capture_refs,
+                                      int *capture_ref_count, int max_refs);
 static esp_err_t base64_chunk_cb(const uint8_t *data, size_t len, void *ctx);
 static esp_err_t stt_stream_cb(const uint8_t *data, size_t len, void *ctx);
 static esp_err_t transcribe_voice_media(const mimi_msg_t *msg, char *out_text,
@@ -69,6 +84,7 @@ static char *encode_photo_to_base64(const mimi_msg_t *msg,
 #define TOOL_OUTPUT_SIZE (8 * 1024)
 #define STT_FALLBACK_MAX_BYTES (128 * 1024)
 #define MAX_TOOL_SIGNATURES (16)
+#define MAX_UI_CAPTURE_REFS 6
 
 typedef struct {
   char name[32];
@@ -85,6 +101,9 @@ typedef struct {
   int wol_scan_result_calls;
   int web_search_calls;
   int http_request_calls;
+  int ui_capture_calls;
+  int ui_action_calls;
+  int ios_sim_capture_calls;
 } tool_turn_state_t;
 
 static bool try_fallback_wol_call(const mimi_msg_t *msg, char *tool_output,
@@ -301,6 +320,19 @@ static bool contains_ci_token_bounded(const char *haystack, const char *token) {
   return false;
 }
 
+static bool contains_any_ci_token(const char *text, const char *const *tokens,
+                                  size_t token_count) {
+  if (!text || !tokens || token_count == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < token_count; i++) {
+    if (tokens[i] && contains_ci_token(text, tokens[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool wol_call_has_selector(const char *input_json) {
   if (!input_json) {
     return false;
@@ -451,6 +483,173 @@ static bool has_wol_intent_keyword(const char *text) {
          contains_ci_token(text, "pc");
 }
 
+static bool extract_first_http_url(const char *text, char *out, size_t out_size) {
+  if (!text || !out || out_size == 0) {
+    return false;
+  }
+  out[0] = '\0';
+
+  const char *https = strstr(text, "https://");
+  const char *http = strstr(text, "http://");
+  const char *start = NULL;
+  if (https && http) {
+    start = (https < http) ? https : http;
+  } else {
+    start = https ? https : http;
+  }
+  if (!start) {
+    return false;
+  }
+
+  const char *end = start;
+  while (*end) {
+    unsigned char c = (unsigned char)*end;
+    if (isspace(c) || c == '"' || c == '\'' || c == '<' || c == '>') {
+      break;
+    }
+    end++;
+  }
+
+  size_t len = (size_t)(end - start);
+  while (len > 0) {
+    char tail = start[len - 1];
+    if (tail == '.' || tail == ',' || tail == '!' || tail == '?' || tail == ')' ||
+        tail == ']' || tail == '}' || tail == '"' || tail == '\'') {
+      len--;
+      continue;
+    }
+    break;
+  }
+  if (len == 0 || len + 1 > out_size) {
+    return false;
+  }
+
+  memcpy(out, start, len);
+  out[len] = '\0';
+  return true;
+}
+
+static int infer_wait_after_tap_ms_from_text(const char *text) {
+  if (!text || text[0] == '\0') {
+    return 1000;
+  }
+
+  for (int sec = 1; sec <= 15; sec++) {
+    char ko_pat1[16];
+    char ko_pat2[16];
+    char en_pat1[24];
+    char en_pat2[24];
+    snprintf(ko_pat1, sizeof(ko_pat1), "%d초", sec);
+    snprintf(ko_pat2, sizeof(ko_pat2), "%d 초", sec);
+    snprintf(en_pat1, sizeof(en_pat1), "%d sec", sec);
+    snprintf(en_pat2, sizeof(en_pat2), "%d second", sec);
+    if (strstr(text, ko_pat1) || strstr(text, ko_pat2) ||
+        contains_ci_token(text, en_pat1) || contains_ci_token(text, en_pat2)) {
+      return sec * 1000;
+    }
+  }
+
+  return 1000;
+}
+
+static bool has_ios_sim_capture_intent(const char *text) {
+  if (!text || text[0] == '\0') {
+    return false;
+  }
+
+  static const char *const start_tokens[] = {
+      "tap to start", "tap-to-start", "tap start", "start button",
+      "tap to play",  "시작 버튼",    "tap 버튼",   "tap to begin"};
+  static const char *const action_tokens[] = {"tap", "click", "press", "누르",
+                                              "클릭"};
+  static const char *const capture_tokens[] = {"화면",      "캡처",      "캡쳐",
+                                               "screenshot", "screen shot", "찍어"};
+  static const char *const send_tokens[] = {"전송", "보내", "send", "deliver"};
+  static const char *const ios_tokens[] = {"아이폰", "iphone", "ios", "mobile",
+                                           "safari", "시뮬레이터", "simulator"};
+
+  const bool has_start_cue =
+      contains_any_ci_token(text, start_tokens,
+                            sizeof(start_tokens) / sizeof(start_tokens[0]));
+  const bool has_action =
+      contains_any_ci_token(text, action_tokens,
+                            sizeof(action_tokens) / sizeof(action_tokens[0]));
+  const bool has_capture =
+      contains_any_ci_token(text, capture_tokens,
+                            sizeof(capture_tokens) / sizeof(capture_tokens[0]));
+  const bool has_send =
+      contains_any_ci_token(text, send_tokens,
+                            sizeof(send_tokens) / sizeof(send_tokens[0]));
+  const bool has_ios_target =
+      contains_any_ci_token(text, ios_tokens,
+                            sizeof(ios_tokens) / sizeof(ios_tokens[0]));
+
+  return has_start_cue && has_action && has_capture && has_send && has_ios_target;
+}
+
+static bool try_fastpath_ios_sim_capture(const mimi_msg_t *msg, char *tool_output,
+                                         size_t tool_output_size,
+                                         char *tool_usage_summary,
+                                         size_t tool_usage_summary_size) {
+  if (!msg || !tool_output || tool_output_size == 0) {
+    return false;
+  }
+  if (strcmp(msg->channel, MIMI_CHAN_TELEGRAM) != 0 ||
+      msg->type != MIMI_MSG_TYPE_TEXT || !msg->content || !msg->chat_id[0]) {
+    return false;
+  }
+
+  if (!has_ios_sim_capture_intent(msg->content)) {
+    return false;
+  }
+
+  char url[256] = {0};
+  if (!extract_first_http_url(msg->content, url, sizeof(url))) {
+    return false;
+  }
+
+  int wait_after_tap_ms = infer_wait_after_tap_ms_from_text(msg->content);
+  int timeout_ms = 30000;
+  int open_wait_ms = 2500;
+
+  cJSON *input = cJSON_CreateObject();
+  if (!input) {
+    snprintf(tool_output, tool_output_size,
+             "Error: failed to build iOS simulator request payload.");
+    return true;
+  }
+  cJSON_AddStringToObject(input, "chat_id", MIMI_UI_DEFAULT_HELPER_CHAT_ID);
+  cJSON_AddStringToObject(input, "tg_chat_id", msg->chat_id);
+  cJSON_AddStringToObject(input, "url", url);
+  cJSON_AddStringToObject(input, "tap_mode", "center");
+  cJSON_AddNumberToObject(input, "open_wait_ms", open_wait_ms);
+  cJSON_AddNumberToObject(input, "wait_after_tap_ms", wait_after_tap_ms);
+  cJSON_AddNumberToObject(input, "timeout_ms", timeout_ms);
+  char *input_json = cJSON_PrintUnformatted(input);
+  cJSON_Delete(input);
+  if (!input_json) {
+    snprintf(tool_output, tool_output_size,
+             "Error: failed to serialize iOS simulator request payload.");
+    return true;
+  }
+
+  tool_output[0] = '\0';
+  esp_err_t err = tool_registry_execute("ios_sim_capture_to_telegram", input_json,
+                                        tool_output, tool_output_size);
+  free(input_json);
+
+  if (tool_usage_summary && tool_usage_summary_size > 0) {
+    append_tool_usage_summary(tool_usage_summary, tool_usage_summary_size,
+                              "ios_sim_capture_to_telegram");
+  }
+
+  if (tool_output[0] == '\0') {
+    snprintf(tool_output, tool_output_size, "iOS simulator capture request handled.");
+  }
+  ESP_LOGI(TAG, "Fast-path iOS sim capture executed: %s", esp_err_to_name(err));
+  return true;
+}
+
 static bool try_fallback_wol_call(const mimi_msg_t *msg, char *tool_output,
                                  size_t tool_output_size,
                                  char *tool_usage_summary,
@@ -539,10 +738,17 @@ static bool should_execute_tool(const llm_tool_call_t *call,
   size_t in_len = strlen(input);
   const bool is_web_search = (strcmp(name, "web_search") == 0);
   const bool is_http_request = (strcmp(name, "http_request") == 0);
+  const bool is_ui_capture = (strcmp(name, "ui_capture") == 0);
+  const bool is_ui_action = (strcmp(name, "ui_action") == 0);
+  const bool is_ios_sim_capture =
+      (strcmp(name, "ios_sim_capture_to_telegram") == 0);
 
   for (int i = 0; i < state->seen_count; i++) {
     const tool_signature_t *sig = &state->seen[i];
     if (strncmp(sig->name, name, sizeof(sig->name)) == 0) {
+      if (is_ui_capture || is_ui_action || is_ios_sim_capture) {
+        continue;
+      }
       if ((is_web_search || is_http_request) && sig->input_len == in_len &&
           sig->input_hash == in_hash) {
         if (skip_output && skip_output_size > 0) {
@@ -560,6 +766,30 @@ static bool should_execute_tool(const llm_tool_call_t *call,
       }
       return false;
     }
+  }
+
+  if (is_ui_capture && state->ui_capture_calls >= 4) {
+    if (skip_output && skip_output_size > 0) {
+      snprintf(skip_output, skip_output_size,
+               "Skipped tool call: ui_capture limit reached for this turn");
+    }
+    return false;
+  }
+
+  if (is_ui_action && state->ui_action_calls >= 6) {
+    if (skip_output && skip_output_size > 0) {
+      snprintf(skip_output, skip_output_size,
+               "Skipped tool call: ui_action limit reached for this turn");
+    }
+    return false;
+  }
+
+  if (is_ios_sim_capture && state->ios_sim_capture_calls >= 1) {
+    if (skip_output && skip_output_size > 0) {
+      snprintf(skip_output, skip_output_size,
+               "Skipped tool call: ios_sim_capture_to_telegram limit reached for this turn");
+    }
+    return false;
   }
 
   if (is_web_search && state->web_search_calls >= 1) {
@@ -629,7 +859,8 @@ static bool should_execute_tool(const llm_tool_call_t *call,
     state->wake_on_lan_called = true;
   }
 
-  if (state->seen_count < MAX_TOOL_SIGNATURES) {
+  if (!is_ui_capture && !is_ui_action && !is_ios_sim_capture &&
+      state->seen_count < MAX_TOOL_SIGNATURES) {
     tool_signature_t *sig = &state->seen[state->seen_count++];
     strncpy(sig->name, name, sizeof(sig->name) - 1);
     sig->name[sizeof(sig->name) - 1] = '\0';
@@ -645,6 +876,12 @@ static bool should_execute_tool(const llm_tool_call_t *call,
     state->web_search_calls++;
   } else if (is_http_request) {
     state->http_request_calls++;
+  } else if (is_ui_capture) {
+    state->ui_capture_calls++;
+  } else if (is_ui_action) {
+    state->ui_action_calls++;
+  } else if (is_ios_sim_capture) {
+    state->ios_sim_capture_calls++;
   }
 
   return true;
@@ -665,6 +902,130 @@ static bool enforce_voice_limit(const mimi_msg_t *msg, size_t file_size) {
     return false;
   }
   return size > 0; /* need size for streaming upload */
+}
+
+static bool inject_ui_tool_chat_id(const mimi_msg_t *msg, const char *tool_name,
+                                   const char *raw_input, char *out_input,
+                                   size_t out_input_size) {
+  if (!msg || !tool_name || !raw_input || !out_input || out_input_size == 0) {
+    return false;
+  }
+  bool is_ui_tool =
+      (strcmp(tool_name, "ui_capture") == 0 || strcmp(tool_name, "ui_action") == 0 ||
+       strcmp(tool_name, "ios_sim_capture_to_telegram") == 0);
+  if (!is_ui_tool) {
+    return false;
+  }
+
+  cJSON *in = cJSON_Parse(raw_input);
+  if (!in || !cJSON_IsObject(in)) {
+    if (in)
+      cJSON_Delete(in);
+    return false;
+  }
+
+  cJSON *chat_id = cJSON_GetObjectItem(in, "chat_id");
+  if (!cJSON_IsString(chat_id) || chat_id->valuestring[0] == '\0') {
+    if (strcmp(msg->channel, MIMI_CHAN_WEBSOCKET) == 0 && msg->chat_id[0] != '\0') {
+      cJSON_AddStringToObject(in, "chat_id", msg->chat_id);
+    } else {
+      cJSON_AddStringToObject(in, "chat_id", MIMI_UI_DEFAULT_HELPER_CHAT_ID);
+    }
+  }
+
+  cJSON *tg_chat_id = cJSON_GetObjectItem(in, "tg_chat_id");
+  if (strcmp(msg->channel, MIMI_CHAN_TELEGRAM) == 0 && msg->chat_id[0] != '\0' &&
+      (!cJSON_IsString(tg_chat_id) || tg_chat_id->valuestring[0] == '\0')) {
+    cJSON_AddStringToObject(in, "tg_chat_id", msg->chat_id);
+  }
+
+  char *patched = cJSON_PrintUnformatted(in);
+  cJSON_Delete(in);
+  if (!patched) {
+    return false;
+  }
+
+  size_t n = strlen(patched);
+  bool ok = false;
+  if (n + 1 <= out_input_size) {
+    memcpy(out_input, patched, n + 1);
+    ok = true;
+  }
+  free(patched);
+  return ok;
+}
+
+static void append_ui_capture_message(cJSON *messages, char **capture_refs,
+                                      int *capture_ref_count, int max_refs) {
+  if (!messages || !capture_refs || !capture_ref_count || max_refs <= 0) {
+    return;
+  }
+
+  ui_capture_frame_t frame = {0};
+  if (!ui_bridge_take_latest_capture(&frame)) {
+    return;
+  }
+
+  if (!frame.image_b64 || frame.image_b64[0] == '\0') {
+    ui_bridge_free_capture(&frame);
+    return;
+  }
+  if (*capture_ref_count >= max_refs) {
+    ESP_LOGW(TAG, "Dropping UI capture (reference limit reached)");
+    ui_bridge_free_capture(&frame);
+    return;
+  }
+
+  cJSON *user_msg = cJSON_CreateObject();
+  cJSON *content = cJSON_CreateArray();
+  cJSON *text_block = cJSON_CreateObject();
+  cJSON *img_block = cJSON_CreateObject();
+  cJSON *source = cJSON_CreateObject();
+  if (!user_msg || !content || !text_block || !img_block || !source) {
+    cJSON_Delete(user_msg);
+    cJSON_Delete(content);
+    cJSON_Delete(text_block);
+    cJSON_Delete(img_block);
+    cJSON_Delete(source);
+    ui_bridge_free_capture(&frame);
+    return;
+  }
+  cJSON_AddStringToObject(user_msg, "role", "user");
+
+  cJSON_AddStringToObject(text_block, "type", "text");
+
+  char summary[256];
+  snprintf(summary, sizeof(summary),
+           "New screen capture received. request_id=%s size=%dx%d rotation=%d. "
+           "Analyze this image and decide the next UI action using normalized "
+           "coordinates (0.0 to 1.0).",
+           frame.request_id, frame.width, frame.height, frame.rotation);
+  cJSON_AddStringToObject(text_block, "text", summary);
+  cJSON_AddItemToArray(content, text_block);
+
+  cJSON_AddStringToObject(img_block, "type", "image");
+  cJSON_AddStringToObject(source, "type", "base64");
+  cJSON_AddStringToObject(source, "media_type",
+                          frame.media_type[0] ? frame.media_type : "image/jpeg");
+  cJSON *data_ref = cJSON_CreateStringReference(frame.image_b64);
+  if (!data_ref) {
+    cJSON_Delete(user_msg);
+    cJSON_Delete(content);
+    cJSON_Delete(img_block);
+    cJSON_Delete(source);
+    ui_bridge_free_capture(&frame);
+    return;
+  }
+  cJSON_AddItemToObject(source, "data", data_ref);
+  cJSON_AddItemToObject(img_block, "source", source);
+  cJSON_AddItemToArray(content, img_block);
+  cJSON_AddItemToObject(user_msg, "content", content);
+  cJSON_AddItemToArray(messages, user_msg);
+
+  capture_refs[*capture_ref_count] = frame.image_b64;
+  (*capture_ref_count)++;
+  frame.image_b64 = NULL;
+  ui_bridge_free_capture(&frame);
 }
 
 static esp_err_t base64_chunk_cb(const uint8_t *data, size_t len, void *ctx) {
@@ -871,6 +1232,7 @@ static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *m
         call->input ? call->input : "{}";
     const char *tool_input = raw_input;
     char inferred_input[192];
+    char ui_input[1024];
     if (strcmp(tool_name, "wake_on_lan") == 0 &&
         !wol_call_has_selector(raw_input)) {
       if (infer_wol_tool_input_from_message(msg ? msg->content : NULL,
@@ -881,6 +1243,11 @@ static cJSON *build_tool_results(const llm_response_t *resp, const mimi_msg_t *m
         ESP_LOGW(TAG, "WOL call missing selector and no selector inferred from msg: %s",
                  msg->content);
       }
+    }
+
+    if (inject_ui_tool_chat_id(msg, tool_name, tool_input, ui_input,
+                               sizeof(ui_input))) {
+      tool_input = ui_input;
     }
 
     /* Execute tool */
@@ -1031,6 +1398,73 @@ static void agent_loop_task(void *arg) {
               sizeof(last_active_chat_id) - 1);
     }
 
+    /* Fast-path for deterministic iOS simulator capture relay requests. */
+    char fast_tool_usage_summary[128] = {0};
+    tool_output[0] = '\0';
+    if (try_fastpath_ios_sim_capture(&msg, tool_output, TOOL_OUTPUT_SIZE,
+                                     fast_tool_usage_summary,
+                                     sizeof(fast_tool_usage_summary))) {
+      const bool fastpath_success =
+          (strstr(tool_output, "iOS sim capture sent to Telegram. file_id=") != NULL);
+
+      /* For success case, helper already delivered the image to Telegram.
+       * Avoid sending extra confirmation text to keep UX to a single response. */
+      if (fastpath_success) {
+        session_append(msg.chat_id, "user", msg.content ? msg.content : "");
+        session_append(msg.chat_id, "assistant",
+                       "[ios-sim-capture-to-telegram] screenshot sent.");
+
+        if (photo_b64_owned) {
+          free(photo_b64_owned);
+          photo_b64_owned = NULL;
+        }
+        free(msg.content);
+        if (msg.media_id)
+          free(msg.media_id);
+
+        ESP_LOGI(TAG, "Fast-path iOS sim capture completed without extra text response");
+        ESP_LOGI(TAG, "Free PSRAM: %d bytes",
+                 (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        continue;
+      }
+
+      char *response_content = strdup(tool_output[0] ? tool_output
+                                                     : "iOS simulator capture request handled.");
+      if (response_content && fast_tool_usage_summary[0] != '\0') {
+        size_t slen =
+            strlen(fast_tool_usage_summary) + strlen(response_content) + 2;
+        char *combined = malloc(slen);
+        if (combined) {
+          snprintf(combined, slen, "%s\n%s", fast_tool_usage_summary,
+                   response_content);
+          free(response_content);
+          response_content = combined;
+        }
+      }
+
+      if (response_content) {
+        session_append(msg.chat_id, "user", msg.content ? msg.content : "");
+        session_append(msg.chat_id, "assistant", response_content);
+        mimi_msg_t out = {0};
+        strncpy(out.channel, msg.channel, sizeof(out.channel) - 1);
+        strncpy(out.chat_id, msg.chat_id, sizeof(out.chat_id) - 1);
+        out.content = response_content; /* transfer ownership */
+        message_bus_push_outbound(&out);
+      }
+
+      if (photo_b64_owned) {
+        free(photo_b64_owned);
+        photo_b64_owned = NULL;
+      }
+      free(msg.content);
+      if (msg.media_id)
+        free(msg.media_id);
+
+      ESP_LOGI(TAG, "Free PSRAM: %d bytes",
+               (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+      continue;
+    }
+
     /* 1. Build system prompt */
     context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
     ESP_LOGI(TAG, "System Prompt (first 100 bytes): %.*s...", 100,
@@ -1043,6 +1477,8 @@ static void agent_loop_task(void *arg) {
     cJSON *messages = cJSON_Parse(history_json);
     if (!messages)
       messages = cJSON_CreateArray();
+    char *ui_capture_refs[MAX_UI_CAPTURE_REFS] = {0};
+    int ui_capture_ref_count = 0;
 
     /* 3. Append current user message */
     cJSON *user_msg = cJSON_CreateObject();
@@ -1189,12 +1625,18 @@ static void agent_loop_task(void *arg) {
       }
 
       cJSON_AddItemToArray(messages, result_msg);
+      append_ui_capture_message(messages, ui_capture_refs, &ui_capture_ref_count,
+                                MAX_UI_CAPTURE_REFS);
 
       llm_response_free(&resp);
       iteration++;
     }
 
     cJSON_Delete(messages);
+    for (int i = 0; i < ui_capture_ref_count; i++) {
+      free(ui_capture_refs[i]);
+      ui_capture_refs[i] = NULL;
+    }
     if (photo_b64_owned) {
       free(photo_b64_owned);
       photo_b64_owned = NULL;

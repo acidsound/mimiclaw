@@ -26,6 +26,7 @@ static int s_retry_count = 0;
 static char s_ip_str[16] = "0.0.0.0";
 static bool s_connected = false;
 static bool s_ap_netif_created = false;
+static esp_netif_t *s_sta_netif = NULL;
 static httpd_handle_t s_prov_httpd = NULL;
 
 static const char *PROV_HTML =
@@ -56,6 +57,119 @@ static const char *PROV_HTML =
     "}"
     "loadScan();"
     "</script></body></html>";
+
+static esp_err_t wifi_enable_sta_dhcp(void) {
+  if (!s_sta_netif) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t err = esp_netif_dhcpc_start(s_sta_netif);
+  if (err == ESP_OK || err == ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) {
+    return ESP_OK;
+  }
+
+  ESP_LOGW(TAG, "Failed to start STA DHCP client: %s", esp_err_to_name(err));
+  return err;
+}
+
+static bool wifi_static_ip_enabled(void) {
+  if (!MIMI_SECRET_WIFI_USE_STATIC_IP) {
+    return false;
+  }
+
+  if (MIMI_SECRET_WIFI_STATIC_IP[0] == '\0' ||
+      MIMI_SECRET_WIFI_STATIC_NETMASK[0] == '\0' ||
+      MIMI_SECRET_WIFI_STATIC_GW[0] == '\0') {
+    ESP_LOGW(TAG, "Static IP enabled but config is incomplete. Falling back to DHCP.");
+    return false;
+  }
+
+  return true;
+}
+
+static esp_err_t wifi_set_sta_dns_from_str(esp_netif_dns_type_t type,
+                                           const char *dns_ip_str) {
+  if (!s_sta_netif) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (!dns_ip_str || dns_ip_str[0] == '\0') {
+    return ESP_OK;
+  }
+
+  esp_netif_dns_info_t dns_info = {0};
+  if (esp_netif_str_to_ip4(dns_ip_str, &dns_info.ip.u_addr.ip4) != ESP_OK) {
+    ESP_LOGW(TAG, "Invalid static DNS IP '%s'", dns_ip_str);
+    return ESP_ERR_INVALID_ARG;
+  }
+  dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+
+  esp_err_t err = esp_netif_set_dns_info(s_sta_netif, type, &dns_info);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to set static DNS(%d) to %s: %s", (int)type,
+             dns_ip_str, esp_err_to_name(err));
+    return err;
+  }
+  return ESP_OK;
+}
+
+static esp_err_t wifi_apply_sta_ip_policy(void) {
+  if (!s_sta_netif) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!wifi_static_ip_enabled()) {
+    return wifi_enable_sta_dhcp();
+  }
+
+  esp_netif_ip_info_t ip_info = {0};
+  if (esp_netif_str_to_ip4(MIMI_SECRET_WIFI_STATIC_IP, &ip_info.ip) != ESP_OK ||
+      esp_netif_str_to_ip4(MIMI_SECRET_WIFI_STATIC_NETMASK, &ip_info.netmask) != ESP_OK ||
+      esp_netif_str_to_ip4(MIMI_SECRET_WIFI_STATIC_GW, &ip_info.gw) != ESP_OK) {
+    ESP_LOGE(TAG,
+             "Invalid static IPv4 config (ip/netmask/gw). Falling back to DHCP.");
+    return wifi_enable_sta_dhcp();
+  }
+
+  esp_err_t err = esp_netif_dhcpc_stop(s_sta_netif);
+  if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+    ESP_LOGW(TAG, "Failed to stop STA DHCP client: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  err = esp_netif_set_ip_info(s_sta_netif, &ip_info);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to apply static IP info: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  const char *main_dns = MIMI_SECRET_WIFI_STATIC_DNS_MAIN[0]
+                             ? MIMI_SECRET_WIFI_STATIC_DNS_MAIN
+                             : MIMI_SECRET_WIFI_STATIC_GW;
+  err = wifi_set_sta_dns_from_str(ESP_NETIF_DNS_MAIN, main_dns);
+  if (err != ESP_OK && MIMI_SECRET_WIFI_STATIC_DNS_MAIN[0] != '\0') {
+    ESP_LOGW(TAG,
+             "Configured main DNS is invalid/unavailable. Falling back to gateway DNS.");
+    err = wifi_set_sta_dns_from_str(ESP_NETIF_DNS_MAIN,
+                                    MIMI_SECRET_WIFI_STATIC_GW);
+  }
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  if (MIMI_SECRET_WIFI_STATIC_DNS_BACKUP[0] != '\0') {
+    esp_err_t backup_dns_err = wifi_set_sta_dns_from_str(
+        ESP_NETIF_DNS_BACKUP, MIMI_SECRET_WIFI_STATIC_DNS_BACKUP);
+    if (backup_dns_err != ESP_OK) {
+      ESP_LOGW(TAG, "Ignoring invalid backup DNS and continuing.");
+    }
+  }
+
+  ESP_LOGI(TAG,
+           "Using static IP: %s (mask=%s gw=%s dns=%s)",
+           MIMI_SECRET_WIFI_STATIC_IP, MIMI_SECRET_WIFI_STATIC_NETMASK,
+           MIMI_SECRET_WIFI_STATIC_GW, main_dns);
+  return ESP_OK;
+}
 
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data) {
@@ -227,6 +341,12 @@ static esp_err_t prov_connect_post_handler(httpd_req_t *req) {
                               "{\"ok\":false,\"error\":\"set_config_failed\"}");
   }
 
+  esp_err_t ip_policy_err = wifi_apply_sta_ip_policy();
+  if (ip_policy_err != ESP_OK) {
+    ESP_LOGW(TAG, "STA IP policy apply failed during provisioning: %s",
+             esp_err_to_name(ip_policy_err));
+  }
+
   err = esp_wifi_connect();
   if (err != ESP_OK) {
     httpd_resp_set_status(req, "500 Internal Server Error");
@@ -307,7 +427,7 @@ esp_err_t wifi_manager_init(void) {
   s_wifi_event_group = xEventGroupCreate();
 
   ESP_ERROR_CHECK(esp_netif_init());
-  esp_netif_create_default_wifi_sta();
+  s_sta_netif = esp_netif_create_default_wifi_sta();
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -367,6 +487,10 @@ esp_err_t wifi_manager_start(void) {
   ESP_LOGI(TAG, "Connecting to SSID: %s", wifi_cfg.sta.ssid);
 
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+  esp_err_t ip_policy_err = wifi_apply_sta_ip_policy();
+  if (ip_policy_err != ESP_OK) {
+    ESP_LOGW(TAG, "STA IP policy apply failed: %s", esp_err_to_name(ip_policy_err));
+  }
   ESP_ERROR_CHECK(esp_wifi_start());
 
   return ESP_OK;

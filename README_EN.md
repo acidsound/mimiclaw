@@ -74,11 +74,11 @@ Edit `main/mimi_secrets.h`:
 ```c
 #define MIMI_SECRET_WIFI_SSID       "YourWiFiName"
 #define MIMI_SECRET_WIFI_PASS       "YourWiFiPassword"
-#define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+#define MIMI_SECRET_TG_TOKEN        "<YOUR_TELEGRAM_BOT_TOKEN>" // format: <bot_id>:<bot_token> (colon required)
 
 /* Choose Provider: MIMI_LLM_PROVIDER_ANTHROPIC or MIMI_LLM_PROVIDER_OPENAI */
 #define MIMI_SECRET_PROVIDER        MIMI_LLM_PROVIDER_ANTHROPIC 
-#define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
+#define MIMI_SECRET_API_KEY         "<YOUR_LLM_API_KEY>"        // format: provider key (e.g., sk-ant-...)
 #define MIMI_SECRET_BASE_URL        "https://api.anthropic.com/v1/messages" // or https://api.moonshot.cn/v1/chat/completions
 
 #define MIMI_SECRET_SEARCH_KEY      ""              // optional: Brave Search API key
@@ -117,7 +117,7 @@ Connect via serial to configure or debug. **Config commands** let you change set
 mimi> wifi_set MySSID MyPassword   # change WiFi network
 mimi> wifi_reset                   # reset WiFi creds (NVS + disable secret fallback)
 mimi> wifi_portal 600              # start SoftAP portal for 10 minutes (seconds)
-mimi> set_tg_token 123456:ABC...   # change Telegram bot token
+mimi> set_tg_token <YOUR_TELEGRAM_BOT_TOKEN>   # change Telegram bot token
 
 # LLM Configuration
 mimi> set_provider kimi            # switch to Kimi (Moonshot AI)
@@ -170,7 +170,7 @@ mimi> wifi_portal 600
 
 4. Set Telegram token:
 ```bash
-mimi> set_tg_token 123456:ABC...
+mimi> set_tg_token <YOUR_TELEGRAM_BOT_TOKEN>
 mimi> restart
 ```
 

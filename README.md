@@ -74,11 +74,11 @@ cp main/mimi_secrets.h.example main/mimi_secrets.h
 ```c
 #define MIMI_SECRET_WIFI_SSID       "WiFi이름"
 #define MIMI_SECRET_WIFI_PASS       "WiFi비밀번호"
-#define MIMI_SECRET_TG_TOKEN        "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+#define MIMI_SECRET_TG_TOKEN        "<YOUR_TELEGRAM_BOT_TOKEN>" // format: <bot_id>:<bot_token> (콜론 필수)
 
 /* 서비스 선택: MIMI_LLM_PROVIDER_ANTHROPIC 또는 MIMI_LLM_PROVIDER_OPENAI */
 #define MIMI_SECRET_PROVIDER        MIMI_LLM_PROVIDER_ANTHROPIC 
-#define MIMI_SECRET_API_KEY         "sk-ant-api03-xxxxx"
+#define MIMI_SECRET_API_KEY         "<YOUR_LLM_API_KEY>"        // format: provider key (예: sk-ant-...)
 #define MIMI_SECRET_BASE_URL        "https://api.anthropic.com/v1/messages" // 또는 https://api.moonshot.cn/v1/chat/completions
 
 #define MIMI_SECRET_SEARCH_KEY      ""              // 선택사항: Brave Search API 키
@@ -117,7 +117,7 @@ idf.py -p PORT flash monitor
 mimi> wifi_set MySSID MyPassword   # WiFi 네트워크 변경
 mimi> wifi_reset                   # WiFi 자격증명 초기화(시크릿 fallback 비활성)
 mimi> wifi_portal 600              # 10분간 SoftAP 포털 실행 (초 단위)
-mimi> set_tg_token 123456:ABC...   # 텔레그램 봇 토큰 변경
+mimi> set_tg_token <YOUR_TELEGRAM_BOT_TOKEN>   # 텔레그램 봇 토큰 변경
 
 # LLM 설정
 mimi> set_provider kimi            # Kimi (Moonshot AI)로 전환
@@ -185,7 +185,7 @@ mimi> wifi_portal 600
 
 4) **텔레그램 토큰 설정**
 ```bash
-mimi> set_tg_token 123456:ABC...
+mimi> set_tg_token <YOUR_TELEGRAM_BOT_TOKEN>
 mimi> restart
 ```
 

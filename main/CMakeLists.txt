@@ -13,6 +13,7 @@ idf_component_register(
         "memory/session_mgr.c"
         "media/media_limits.c"
         "gateway/ws_server.c"
+        "gateway/ui_bridge.c"
         "cli/serial_cli.c"
         "ota/ota_manager.c"
         "proxy/http_proxy.c"
@@ -25,6 +26,7 @@ idf_component_register(
         "tools/tool_memory.c"
         "tools/tool_system.c"
         "tools/tool_stt.c"
+        "tools/tool_ui.c"
         "utils/log_redact.c"
         "utils/base64_stream.c"
     INCLUDE_DIRS
